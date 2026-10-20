@@ -1,0 +1,66 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dunite-app",
+    "crates/dunite-ui",
+    "crates/dunite-editor",
+    "crates/dunite-markdown",
+    "crates/dunite-vault",
+    "crates/dunite-index",
+    "crates/dunite-git",
+    "crates/dunite-settings",
+]
+
+# ВНИМАНИЕ: xattr 0.2.3 (зависимость gpui → zed-async-tar) использует
+# libc::ENOATTR, удалённый в libc 0.2.190. Крейт пропатчен локально в
+# vendor/xattr (см. vendor/xattr/VENDOR-PATCH.md) и подключён ниже через
+# [patch.crates-io]. Не удалять патч, пока gpui не перейдёт на xattr 1.x.
+
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.92"
+
+[workspace.dependencies]
+# внутренние крейты (границы слоёв — SPEC §6)
+dunite-app = { path = "crates/dunite-app" }
+dunite-ui = { path = "crates/dunite-ui" }
+dunite-editor = { path = "crates/dunite-editor" }
+dunite-markdown = { path = "crates/dunite-markdown" }
+dunite-vault = { path = "crates/dunite-vault" }
+dunite-index = { path = "crates/dunite-index" }
+dunite-git = { path = "crates/dunite-git" }
+dunite-settings = { path = "crates/dunite-settings" }
+
+# внешние зависимости (SPEC §5); gpui пинним из-за нестабильного API
+gpui = "=0.2.2"
+ropey = "1.6"
+pulldown-cmark = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_yml = "0.0.12"
+toml = "0.8"
+dirs = "6"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+notify = "8"
+git2 = "0.20"
+tantivy = "0.24"
+image = "0.25"
+nucleo-matcher = "0.3"
+
+# dev
+tempfile = "3"
+proptest = "1"
+criterion = "0.5"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

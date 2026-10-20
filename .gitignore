@@ -1,0 +1,12 @@
+ignored/
+
+# Rust
+/target
+**/*.rs.bk
+
+# runtime-данные dunite внутри хранилищ (SPEC §7.6)
+.dunite/
+
+# шум ОС
+.DS_Store
+Thumbs.db

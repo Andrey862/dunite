@@ -1,0 +1,10 @@
+[package]
+name = "dunite-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ropey.workspace = true
+dunite-markdown.workspace = true
