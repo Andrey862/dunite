@@ -138,6 +138,22 @@ impl Vault {
         walk(&self.tree, &mut out);
         out.into_iter()
     }
+
+    /// Ищет заметку по имени файла (без пути и расширения).
+    ///
+    /// Упрощённый резолвинг ссылок для M2; полный (пути, алиасы, короткие
+    /// имена) — M3 (SPEC §7.2). Регистронезависимо.
+    pub fn find_note_by_name(&self, name: &str) -> Option<NoteId> {
+        let name_lower = name.to_lowercase();
+        self.iter_notes()
+            .find(|entry| {
+                NoteId::new(entry.rel_path.clone())
+                    .file_stem()
+                    .to_lowercase()
+                    == name_lower
+            })
+            .map(|entry| entry.note_id())
+    }
 }
 
 #[derive(Default)]

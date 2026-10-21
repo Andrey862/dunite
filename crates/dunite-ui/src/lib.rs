@@ -1,6 +1,7 @@
 //! UI dunite на gpui (SPEC §9): дерево файлов, табы, редактор, статус-бар.
 
 pub mod actions;
+pub mod decor;
 pub mod editor_element;
 pub mod editor_pane;
 pub mod file_tree;

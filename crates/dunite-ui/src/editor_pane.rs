@@ -11,7 +11,8 @@ use gpui::{
 };
 
 use crate::actions::*;
-use crate::editor_element::{EditorElement, LINE_HEIGHT_PX, PaintState, col_of_byte};
+use crate::decor::DEFAULT_HEIGHT;
+use crate::editor_element::{EditorElement, PaintState};
 use crate::workspace::Workspace;
 
 /// Клик: распознавание двойного/тройного нажатия.
@@ -283,6 +284,20 @@ impl Workspace {
         let Some(offset) = self.offset_for_position(event.position) else {
             return;
         };
+
+        // клик по чекбоксу — переключить (SPEC §8.2)
+        if let Some(range) = self.checkbox_at(offset) {
+            self.toggle_checkbox(range, cx);
+            return;
+        }
+        // клик по ссылке: в неактивном блоке или с Ctrl — переход (SPEC §8.2)
+        if let Some(target) = self.link_target_at(offset) {
+            if event.modifiers.control || !self.block_active_at(offset) {
+                self.open_link(&target, cx);
+                return;
+            }
+        }
+
         let now = Instant::now();
         let same_spot = (event.position - self.click.position).magnitude() < CLICK_SLOP_F64
             && now.duration_since(self.click.time) < CLICK_INTERVAL;
@@ -339,7 +354,7 @@ impl Workspace {
     ) {
         let delta_y = match event.delta {
             ScrollDelta::Pixels(pixels) => pixels.y.to_f64() as f32,
-            ScrollDelta::Lines(lines) => lines.y * LINE_HEIGHT_PX * 3.,
+            ScrollDelta::Lines(lines) => lines.y * DEFAULT_HEIGHT * 3.,
         };
         self.scroll_px -= delta_y;
         self.clamp_scroll();
@@ -351,24 +366,24 @@ impl Workspace {
         let paint = self.paint_state.as_ref()?;
         let tab = self.tabs.get(self.active_tab)?;
         let buffer = tab.editor.buffer();
-        let line_ix = paint.line_for_y(position.y, buffer.len_lines());
+        let line_ix = paint.line_for_y(position.y);
         let content = buffer.line_content_range(line_ix);
 
-        let col = match paint.rows.iter().find(|row| row.line_ix == line_ix) {
+        match paint.row_at(line_ix) {
             Some(row) => {
                 let x = position.x - paint.text_left();
-                col_of_byte(&row.line_text, row.shaped.closest_index_for_x(x))
+                let vis_byte = row.shaped.closest_index_for_x(x);
+                Some(row.char_for_vis_byte(vis_byte).unwrap_or(content.start))
             }
             None => {
                 // строка за пределами видимой области (drag)
-                if position.x < paint.text_left() {
-                    0
+                Some(if position.x < paint.text_left() {
+                    content.start
                 } else {
-                    content.end - content.start
-                }
+                    content.end
+                })
             }
-        };
-        Some(content.start + col)
+        }
     }
 
     fn clamp_scroll(&mut self) {
@@ -378,9 +393,9 @@ impl Workspace {
             .map(|paint| paint.viewport_height())
             .unwrap_or(0.);
         let total_h = self
-            .tabs
-            .get(self.active_tab)
-            .map(|tab| tab.editor.buffer().len_lines() as f32 * LINE_HEIGHT_PX)
+            .layout
+            .as_ref()
+            .map(|layout| layout.tops.last().copied().unwrap_or(0.))
             .unwrap_or(0.);
         let max_scroll = (total_h - viewport_h).max(0.);
         self.scroll_px = self.scroll_px.clamp(0., max_scroll);
@@ -388,22 +403,137 @@ impl Workspace {
 
     /// Доскроллить так, чтобы курсор был виден.
     pub(crate) fn scroll_cursor_into_view(&mut self) {
-        let Some(paint) = self.paint_state.as_ref() else {
+        self.ensure_layout();
+        let viewport_h = self
+            .paint_state
+            .as_ref()
+            .map(|paint| paint.viewport_height())
+            .unwrap_or(0.);
+        let Some(layout) = self.layout.as_ref() else {
             return;
         };
-        let viewport_h = paint.viewport_height();
         let line = self
             .tabs
             .get(self.active_tab)
             .map(|tab| tab.editor.cursor_line())
             .unwrap_or(0);
-        let cursor_y = line as f32 * LINE_HEIGHT_PX;
-        if cursor_y < self.scroll_px {
-            self.scroll_px = cursor_y;
-        } else if cursor_y + LINE_HEIGHT_PX > self.scroll_px + viewport_h {
-            self.scroll_px = cursor_y + LINE_HEIGHT_PX - viewport_h;
+        let top = layout.tops.get(line).copied().unwrap_or(0.);
+        let height = layout.heights.get(line).copied().unwrap_or(20.);
+        if top < self.scroll_px {
+            self.scroll_px = top;
+        } else if top + height > self.scroll_px + viewport_h {
+            self.scroll_px = top + height - viewport_h;
         }
         self.clamp_scroll();
+    }
+
+    // ── кликабельные элементы (SPEC §8.2) ─────────────────────────────────
+
+    /// Диапазон чекбокса `[x]` под смещением.
+    fn checkbox_at(&self, offset: usize) -> Option<std::ops::Range<usize>> {
+        let layout = self.layout.as_ref()?;
+        for block in &layout.parsed.blocks {
+            if let dunite_markdown::BlockKind::ListItem {
+                checkbox: Some(checkbox),
+                ..
+            } = &block.kind
+            {
+                if checkbox.range.start <= offset && offset < checkbox.range.end {
+                    return Some(checkbox.range.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Цель ссылки под смещением (`[[target]]` / `[текст](target)`).
+    fn link_target_at(&self, offset: usize) -> Option<String> {
+        let layout = self.layout.as_ref()?;
+        let tab = self.tabs.get(self.active_tab)?;
+        for block in &layout.parsed.blocks {
+            for inline in &block.inlines {
+                let range = inline.range();
+                if range.start <= offset && offset < range.end {
+                    let target = match inline {
+                        dunite_markdown::Inline::WikiLink {
+                            target,
+                            embed: false,
+                            ..
+                        } => target.clone(),
+                        dunite_markdown::Inline::MarkdownLink {
+                            target,
+                            image: false,
+                            ..
+                        } => target.clone(),
+                        _ => return None,
+                    };
+                    return Some(tab.editor.buffer().slice(target));
+                }
+            }
+        }
+        None
+    }
+
+    /// Находится ли смещение в активном блоке (блоке с курсором).
+    fn block_active_at(&self, offset: usize) -> bool {
+        let Some(layout) = self.layout.as_ref() else {
+            return false;
+        };
+        let Some(cursor) = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| tab.editor.selection().head)
+        else {
+            return false;
+        };
+        let block_of = |offset: usize| {
+            layout
+                .parsed
+                .blocks
+                .iter()
+                .position(|block| block.range.start <= offset && offset <= block.range.end)
+        };
+        block_of(offset).is_some_and(|ix| Some(ix) == block_of(cursor))
+    }
+
+    /// Переход по ссылке: резолвинг цели и открытие заметки (упрощённый,
+    /// полный резолвинг ссылок — M3, SPEC §7.2).
+    fn open_link(&mut self, target: &str, cx: &mut Context<Self>) {
+        let target = target.trim();
+        let resolved = [format!("{target}.md"), target.to_string()]
+            .into_iter()
+            .find(|rel| self.vault.absolute(rel).is_file())
+            .or_else(|| {
+                self.vault
+                    .find_note_by_name(target)
+                    .map(|id| id.as_str().to_string())
+            });
+        match resolved {
+            Some(rel) => self.open_note(&rel, cx),
+            None => {
+                self.status_message = format!("ссылка не найдена: {target}");
+                cx.notify();
+            }
+        }
+    }
+
+    /// Переключение чекбокса `[x]` ↔ `[ ]` через модель редактора.
+    fn toggle_checkbox(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        let current = tab.editor.buffer().slice(range.clone());
+        let new = if current.starts_with("[ ]") {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        self.with_editor(cx, |editor, _| {
+            editor.set_cursor(range.start, false);
+            editor.set_cursor(range.end, true);
+            editor.insert_text(new);
+        });
+        self.after_edit(cx);
     }
 
     // ── автосейв (SPEC §10.3) ────────────────────────────────────────────
@@ -580,13 +710,13 @@ impl EntityInputHandler for Workspace {
         let start = utf16_to_char(&text, range_utf16.start);
         let line = buffer.line_of(start);
         let content = buffer.line_content_range(line);
-        let row = paint.rows.iter().find(|row| row.line_ix == line)?;
-        let col = start.clamp(content.start, content.end) - content.start;
-        let x = paint.text_left() + row.shaped.x_for_index(col_of_byte(&row.line_text, col));
+        let row = paint.row_at(line)?;
+        let vis_byte = row.vis_byte_for_char(start.clamp(content.start, content.end));
+        let x = paint.text_left() + row.shaped.x_for_index(vis_byte);
         let y = bounds.top() + row.y;
         Some(gpui::Bounds::new(
             gpui::point(x, y),
-            gpui::size(px(0.), paint.line_height),
+            gpui::size(px(0.), row.height),
         ))
     }
 

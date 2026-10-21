@@ -1,0 +1,542 @@
+//! Декорации Live Preview (SPEC §8.2).
+//!
+//! Для каждой строки строится список «кусочков» (Piece): что показать вместо
+//! исходного текста. Маркеры списков/чекбоксов подменяются глифами, скрытые
+//! конструкции исчезают (concealment), стили расставляются по инлайнам.
+//!
+//! Сопоставление «символ исходника ↔ видимый текст» хранится в каждом кусочке
+//! (`char`) — это нужно для кликов (ссылки, чекбоксы) и для курсора.
+
+use std::ops::Range;
+
+use dunite_markdown::{BlockKind, Checkbox, Inline, ParsedNote};
+
+// ── стили ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleColor {
+    Default,
+    Muted,
+    Accent,
+    Heading,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegStyle {
+    pub bold: bool,
+    pub italic: bool,
+    pub strike: bool,
+    pub underline: bool,
+    pub color: StyleColor,
+    pub code_bg: bool,
+}
+
+impl Default for SegStyle {
+    fn default() -> Self {
+        Self {
+            bold: false,
+            italic: false,
+            strike: false,
+            underline: false,
+            color: StyleColor::Default,
+            code_bg: false,
+        }
+    }
+}
+
+impl SegStyle {
+    pub fn heading(_level: u8) -> Self {
+        Self {
+            bold: true,
+            color: StyleColor::Heading,
+            ..Self::default()
+        }
+    }
+
+    pub fn muted() -> Self {
+        Self {
+            color: StyleColor::Muted,
+            ..Self::default()
+        }
+    }
+
+    pub fn accent(underline: bool) -> Self {
+        Self {
+            color: StyleColor::Accent,
+            underline,
+            ..Self::default()
+        }
+    }
+}
+
+// ── результат декорирования строки ───────────────────────────────────────
+
+/// Кусок видимого текста строки.
+#[derive(Debug, Clone)]
+pub struct Piece {
+    /// Char-диапазон в исходнике (для кликов и курсора).
+    pub char: Range<usize>,
+    /// Видимый текст куска (глиф-подмена или подстрока исходника).
+    pub text: String,
+    pub style: SegStyle,
+}
+
+/// Фоновая/векторная декорация строки.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LineQuad {
+    /// Горизонтальная линия `---`.
+    Rule,
+    /// Вертикальная полоса цитаты.
+    QuoteBar,
+    /// Фон code-блока.
+    CodeBg,
+    /// Фон frontmatter.
+    FrontmatterBg,
+}
+
+/// Полное декорирование строки.
+#[derive(Debug, Clone)]
+pub struct LineDecor {
+    pub pieces: Vec<Piece>,
+    /// Высота строки в пикселях.
+    pub height: f32,
+    /// Размер шрифта строки.
+    pub font_size: f32,
+    pub quads: Vec<LineQuad>,
+    /// Стиль «по умолчанию» для незакрытых кусков (зависит от блока).
+    pub base_style: SegStyle,
+}
+
+/// Метрики строки по умолчанию (константы SPEC §8.4).
+pub const DEFAULT_HEIGHT: f32 = 20.;
+pub const DEFAULT_FONT_SIZE: f32 = 13.;
+
+/// Высота и размер шрифта строки по типу блока.
+pub fn line_metrics(kind: Option<&BlockKind>) -> (f32, f32) {
+    match kind {
+        Some(BlockKind::Heading { level, .. }) => match level {
+            1 => (34., 22.),
+            2 => (30., 18.),
+            3 => (26., 15.),
+            _ => (23., 13.5),
+        },
+        Some(BlockKind::Rule) => (24., DEFAULT_FONT_SIZE),
+        Some(BlockKind::CodeBlock { .. }) => (20., 12.5),
+        Some(BlockKind::Frontmatter) => (18., 11.5),
+        _ => (DEFAULT_HEIGHT, DEFAULT_FONT_SIZE),
+    }
+}
+
+// ── построение декораций ─────────────────────────────────────────────────
+
+/// Декорирует строку: `line_range` — char-диапазон содержимого строки,
+/// `active_block` — индекс блока с курсором (его маркеры не скрываются).
+pub fn decorate_line(
+    parsed: &ParsedNote,
+    line_range: Range<usize>,
+    line_text: &str,
+    active_block: Option<usize>,
+) -> LineDecor {
+    let block_ix = parsed.blocks.iter().position(|block| {
+        block.range.start <= line_range.start && line_range.start < block.range.end
+    });
+    let block = block_ix.and_then(|ix| parsed.blocks.get(ix));
+    let active = block_ix.is_some_and(|ix| Some(ix) == active_block);
+
+    let (height, font_size) = line_metrics(block.map(|b| &b.kind));
+    let base_style = match block.map(|b| &b.kind) {
+        Some(BlockKind::Heading { level, .. }) => SegStyle::heading(*level),
+        Some(BlockKind::Quote { .. }) | Some(BlockKind::Frontmatter) => SegStyle::muted(),
+        _ => SegStyle::default(),
+    };
+
+    let mut plans: Vec<Plan> = Vec::new();
+    let mut quads: Vec<LineQuad> = Vec::new();
+
+    // ── блочные маркеры ──
+    if let Some(block) = block {
+        match &block.kind {
+            BlockKind::Heading { marker, .. } => {
+                push_plan(
+                    &mut plans,
+                    intersect(marker, &line_range),
+                    if active {
+                        Action::Keep(base_style)
+                    } else {
+                        Action::Drop
+                    },
+                );
+            }
+            BlockKind::Quote { markers } => {
+                quads.push(LineQuad::QuoteBar);
+                for marker in markers {
+                    let Some(range) = intersect(marker, &line_range) else {
+                        continue;
+                    };
+                    let width = range.end - range.start;
+                    push_plan(
+                        &mut plans,
+                        Some(range),
+                        Action::Replace(" ".repeat(width), SegStyle::muted()),
+                    );
+                }
+            }
+            BlockKind::ListItem {
+                marker,
+                ordered,
+                checkbox,
+            } => {
+                // отступ остаётся видимым, маркер подменяется глифом
+                let indent = marker_start_indent(line_text);
+                if let Some(range) = intersect(marker, &line_range) {
+                    let proper_start = range.start + indent.min(range.end - range.start);
+                    if proper_start > range.start {
+                        push_plan(
+                            &mut plans,
+                            Some(range.start..proper_start),
+                            Action::Keep(base_style),
+                        );
+                    }
+                    if range.end > proper_start {
+                        let width = range.end - proper_start;
+                        let (glyph, style) = match ordered {
+                            Some(_) => (
+                                line_text[byte_of_char(line_text, proper_start - range.start)..]
+                                    .chars()
+                                    .take(width)
+                                    .collect::<String>(),
+                                SegStyle::accent(false),
+                            ),
+                            None => (
+                                format!("{}{}", '•', " ".repeat(width - 1)),
+                                SegStyle::accent(false),
+                            ),
+                        };
+                        push_plan(
+                            &mut plans,
+                            Some(proper_start..range.end),
+                            Action::Replace(glyph, style),
+                        );
+                    }
+                }
+                if let Some(Checkbox { range, checked }) = checkbox {
+                    if let Some(range) = intersect(range, &line_range) {
+                        let width = range.end - range.start;
+                        let glyph = if *checked { "☑" } else { "☐" };
+                        push_plan(
+                            &mut plans,
+                            Some(range),
+                            Action::Replace(
+                                format!("{}{}", glyph, " ".repeat(width - 1)),
+                                SegStyle::accent(false),
+                            ),
+                        );
+                    }
+                }
+            }
+            BlockKind::CodeBlock {
+                fence_start,
+                fence_end,
+                ..
+            } => {
+                quads.push(LineQuad::CodeBg);
+                let fence_style = SegStyle::muted();
+                for fence in [Some(fence_start), fence_end.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    push_plan(
+                        &mut plans,
+                        intersect(fence, &line_range),
+                        if active {
+                            Action::Keep(fence_style)
+                        } else {
+                            Action::Drop
+                        },
+                    );
+                }
+            }
+            BlockKind::Rule => {
+                quads.push(LineQuad::Rule);
+                push_plan(&mut plans, Some(line_range.clone()), Action::Drop);
+            }
+            BlockKind::Frontmatter => {
+                quads.push(LineQuad::FrontmatterBg);
+                push_plan(
+                    &mut plans,
+                    Some(line_range.clone()),
+                    Action::Keep(SegStyle::muted()),
+                );
+            }
+            BlockKind::Paragraph => {}
+        }
+    }
+
+    // ── инлайны ──
+    if let Some(block) = block {
+        for inline in &block.inlines {
+            let Some(range) = intersect(&inline.range(), &line_range) else {
+                continue;
+            };
+            let style = inline_style(inline);
+            if active {
+                push_plan(&mut plans, Some(range), Action::Keep(style));
+            } else {
+                // видимой остаётся только visible_range, маркеры скрываются
+                let visible = inline.visible_range();
+                if visible.is_empty() {
+                    push_plan(&mut plans, Some(range), Action::Drop);
+                    continue;
+                }
+                let (start, end) = (range.start, range.end);
+                if start < visible.start {
+                    push_plan(
+                        &mut plans,
+                        Some(start..visible.start.min(end)),
+                        Action::Drop,
+                    );
+                }
+                let mid_start = start.max(visible.start);
+                let mid_end = end.min(visible.end);
+                if mid_start < mid_end {
+                    push_plan(&mut plans, Some(mid_start..mid_end), Action::Keep(style));
+                }
+                if visible.end < end {
+                    push_plan(&mut plans, Some(visible.end.max(start)..end), Action::Drop);
+                }
+            }
+        }
+    }
+
+    let pieces = materialize(line_range, line_text, plans, base_style);
+    LineDecor {
+        pieces,
+        height,
+        font_size,
+        quads,
+        base_style,
+    }
+}
+
+// ── внутренние детали ────────────────────────────────────────────────────
+
+enum Action {
+    Keep(SegStyle),
+    /// Подмена текстом той же «ширины» (глиф маркера).
+    Replace(String, SegStyle),
+    Drop,
+}
+
+struct Plan {
+    range: Range<usize>,
+    action: Action,
+}
+
+fn push_plan(plans: &mut Vec<Plan>, range: Option<Range<usize>>, action: Action) {
+    if let Some(range) = range {
+        if range.start < range.end {
+            plans.push(Plan { range, action });
+        }
+    }
+}
+
+fn intersect(range: &Range<usize>, line: &Range<usize>) -> Option<Range<usize>> {
+    let start = range.start.max(line.start);
+    let end = range.end.min(line.end);
+    (start < end).then_some(start..end)
+}
+
+/// Сколько символов отступа (пробелов/табов) в начале строки.
+fn marker_start_indent(line_text: &str) -> usize {
+    line_text.chars().take_while(|c| c.is_whitespace()).count()
+}
+
+fn byte_of_char(text: &str, col: usize) -> usize {
+    text.char_indices()
+        .nth(col)
+        .map(|(byte_ix, _)| byte_ix)
+        .unwrap_or(text.len())
+}
+
+fn inline_style(inline: &Inline) -> SegStyle {
+    match inline {
+        Inline::Emphasis { strong, .. } => SegStyle {
+            bold: *strong,
+            italic: !*strong,
+            ..SegStyle::default()
+        },
+        Inline::Strikethrough { .. } => SegStyle {
+            strike: true,
+            ..SegStyle::default()
+        },
+        Inline::CodeSpan { .. } => SegStyle {
+            code_bg: true,
+            color: StyleColor::Default,
+            ..SegStyle::default()
+        },
+        Inline::WikiLink { embed, .. } => {
+            if *embed {
+                SegStyle::muted()
+            } else {
+                SegStyle::accent(true)
+            }
+        }
+        Inline::MarkdownLink { image, .. } => {
+            if *image {
+                SegStyle::muted()
+            } else {
+                SegStyle::accent(true)
+            }
+        }
+        Inline::Tag { .. } => SegStyle {
+            code_bg: true,
+            color: StyleColor::Accent,
+            ..SegStyle::default()
+        },
+        Inline::BlockId { .. } => SegStyle::muted(),
+    }
+}
+
+/// Собирает куски: сортирует планы, устраняет пересечения, заполняет пробелы.
+fn materialize(
+    line_range: Range<usize>,
+    line_text: &str,
+    mut plans: Vec<Plan>,
+    base_style: SegStyle,
+) -> Vec<Piece> {
+    plans.sort_by_key(|plan| plan.range.start);
+    let mut pieces = Vec::new();
+    let mut pos = line_range.start;
+
+    for plan in plans {
+        if plan.range.start < pos {
+            continue;
+        }
+        let plan_end = plan.range.end;
+        if plan.range.start > pos {
+            pieces.push(text_piece(line_text, pos..plan.range.start, base_style));
+        }
+        match plan.action {
+            Action::Keep(style) => pieces.push(text_piece(line_text, plan.range.clone(), style)),
+            Action::Replace(text, style) => pieces.push(Piece {
+                char: plan.range,
+                text,
+                style,
+            }),
+            Action::Drop => {}
+        }
+        pos = plan_end;
+    }
+    if pos < line_range.end {
+        pieces.push(text_piece(line_text, pos..line_range.end, base_style));
+    }
+    pieces
+}
+
+fn text_piece(line_text: &str, range: Range<usize>, style: SegStyle) -> Piece {
+    let from = byte_of_char(line_text, range.start);
+    let to = byte_of_char(line_text, range.end);
+    Piece {
+        char: range,
+        text: line_text[from..to].to_string(),
+        style,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decor_for(text: &str, cursor: usize) -> (ParsedNote, LineDecor) {
+        let parsed = dunite_markdown::parse(text);
+        let line_range = 0..text.trim_end_matches('\n').chars().count();
+        let active = parsed
+            .blocks
+            .iter()
+            .position(|b| b.range.start <= cursor && cursor <= b.range.end);
+        let decor = decorate_line(&parsed, line_range, text.trim_end_matches('\n'), active);
+        (parsed, decor)
+    }
+
+    #[test]
+    fn bullet_replaced_with_glyph() {
+        let (parsed, decor) = decor_for("- пункт\n", 3);
+        assert_eq!(decor.pieces[0].text, "• ");
+        assert_eq!(decor.pieces[1].text, "пункт");
+        // маркер скрыт: глиф ссылается на исходный диапазон
+        assert_eq!(decor.pieces[0].char, 0..2);
+        assert_eq!(parsed.blocks.len(), 1);
+    }
+
+    #[test]
+    fn checkbox_replaced_with_glyph() {
+        let (_, decor) = decor_for("- [x] задача\n", 10);
+        assert!(decor.pieces.iter().any(|p| p.text.starts_with('☑')));
+    }
+
+    #[test]
+    fn heading_marker_hidden_when_inactive() {
+        let text = "# Заголовок\nтекст\n";
+        let parsed = dunite_markdown::parse(text);
+        let decor = decorate_line(&parsed, 0..11, "# Заголовок", Some(1));
+        // блок неактивен: `# ` скрыт, видно только текст
+        assert_eq!(decor.pieces.len(), 1);
+        assert_eq!(decor.pieces[0].text, "Заголовок");
+    }
+
+    #[test]
+    fn heading_marker_shown_when_active() {
+        let text = "# Заголовок\n";
+        let parsed = dunite_markdown::parse(text);
+        let decor = decorate_line(&parsed, 0..11, "# Заголовок", Some(0));
+        assert_eq!(decor.pieces[0].text, "# ");
+        assert_eq!(decor.pieces.len(), 2);
+    }
+
+    #[test]
+    fn bold_markers_hidden_when_inactive() {
+        let text = "текст **жирный** конец\n";
+        let parsed = dunite_markdown::parse(text);
+        let decor = decorate_line(&parsed, 0..22, "текст **жирный** конец", Some(1));
+        let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(visible, "текст жирный конец");
+    }
+
+    #[test]
+    fn bold_markers_shown_when_active() {
+        let text = "текст **жирный** конец\n";
+        let parsed = dunite_markdown::parse(text);
+        let decor = decorate_line(&parsed, 0..22, "текст **жирный** конец", Some(0));
+        let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(visible, "текст **жирный** конец");
+    }
+
+    #[test]
+    fn wikilink_shows_display_when_inactive() {
+        let text = "[[Alpha|Страница]]\n";
+        let parsed = dunite_markdown::parse(text);
+        let decor = decorate_line(&parsed, 0..18, "[[Alpha|Страница]]", Some(1));
+        let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(visible, "Страница");
+    }
+
+    #[test]
+    fn rule_becomes_line() {
+        let text = "---\n";
+        let parsed = dunite_markdown::parse(text);
+        let decor = decorate_line(&parsed, 0..3, "---", None);
+        assert_eq!(decor.quads, vec![LineQuad::Rule]);
+        assert!(decor.pieces.iter().all(|p| p.text.is_empty()));
+    }
+
+    #[test]
+    fn quote_marker_replaced_with_spaces() {
+        let text = "> цитата\n";
+        let parsed = dunite_markdown::parse(text);
+        let decor = decorate_line(&parsed, 0..8, "> цитата", Some(1));
+        assert!(decor.quads.contains(&LineQuad::QuoteBar));
+        assert_eq!(decor.pieces[0].text, "  ");
+        let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(visible, "  цитата");
+    }
+}

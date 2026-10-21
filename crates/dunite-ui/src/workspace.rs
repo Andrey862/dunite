@@ -4,16 +4,32 @@
 //! Дальше — сплиты, сайдбары (outline/backlinks/теги), палитры команд.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use dunite_editor::Editor;
+use dunite_markdown::ParsedNote;
 use dunite_settings::Settings;
 use dunite_vault::{NoteId, Vault};
 use gpui::{Context, FocusHandle, FontWeight, Render, Window, div, prelude::*, px};
 
 use crate::actions::{CloseTab, NextTab, PrevTab, Quit};
+use crate::decor;
 use crate::editor_element::PaintState;
 use crate::editor_pane::ClickTracker;
 use crate::theme::Palette;
+
+/// Кэш раскладки редактора (SPEC §8.2): парсинг markdown и позиции строк.
+///
+/// Пересчитывается при смене версии буфера. Инкрементальный репарсинг
+/// отдельных блоков — будущая оптимизация; полный парсинг заметки быстр.
+pub struct EditorLayout {
+    pub version: u64,
+    pub parsed: ParsedNote,
+    /// Верх каждой строки (пиксели контента) + итоговая высота.
+    pub tops: Rc<Vec<f32>>,
+    /// Высоты строк.
+    pub heights: Rc<Vec<f32>>,
+}
 
 /// Открытая вкладка.
 pub struct Tab {
@@ -35,6 +51,8 @@ pub struct Workspace {
     pub(crate) scroll_px: f32,
     /// Геометрия последнего рендера (hit-testing мыши).
     pub(crate) paint_state: Option<PaintState>,
+    /// Кэш раскладки (парсинг + вертикальные позиции строк).
+    pub(crate) layout: Option<EditorLayout>,
     /// Идёт выделение мышью (drag).
     pub(crate) selecting: bool,
     /// Распознавание двойного/тройного клика.
@@ -57,6 +75,7 @@ impl Workspace {
             status_message: String::new(),
             scroll_px: 0.,
             paint_state: None,
+            layout: None,
             selecting: false,
             click: ClickTracker::default(),
             focus_handle,
@@ -143,6 +162,63 @@ impl Workspace {
             self.expanded.insert(rel_path.to_string());
         }
         cx.notify();
+    }
+
+    /// Пересчитывает кэш раскладки, если буфер изменился.
+    pub(crate) fn ensure_layout(&mut self) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            self.layout = None;
+            return;
+        };
+        let version = tab.editor.version();
+        if self
+            .layout
+            .as_ref()
+            .is_some_and(|layout| layout.version == version)
+        {
+            return;
+        }
+        let text = tab.editor.text();
+        let parsed = dunite_markdown::parse(&text);
+        let buffer = tab.editor.buffer();
+        let total_lines = buffer.len_lines();
+
+        let mut heights = Vec::with_capacity(total_lines);
+        for line_ix in 0..total_lines {
+            let line_start = buffer.line_start(line_ix);
+            let kind = parsed
+                .blocks
+                .iter()
+                .find(|block| block.range.start <= line_start && line_start < block.range.end)
+                .map(|block| &block.kind);
+            heights.push(decor::line_metrics(kind).0);
+        }
+        let mut tops = Vec::with_capacity(total_lines + 1);
+        let mut acc = 0.;
+        for height in &heights {
+            tops.push(acc);
+            acc += height;
+        }
+        tops.push(acc);
+
+        self.layout = Some(EditorLayout {
+            version,
+            parsed,
+            heights: Rc::new(heights),
+            tops: Rc::new(tops),
+        });
+    }
+
+    /// Индекс активного блока (блок с курсором) в кэше раскладки.
+    pub(crate) fn active_block_index(&self) -> Option<usize> {
+        let layout = self.layout.as_ref()?;
+        let tab = self.tabs.get(self.active_tab)?;
+        let cursor = tab.editor.selection().head;
+        layout
+            .parsed
+            .blocks
+            .iter()
+            .position(|block| block.range.start <= cursor && cursor <= block.range.end)
     }
 
     /// Верхняя панель: имя приложения и корень хранилища.
