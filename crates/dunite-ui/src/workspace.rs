@@ -1,22 +1,24 @@
 //! Корневое представление рабочей области (SPEC §9).
 //!
-//! Состояние M0: дерево, открытые вкладки, статус-бар. Дальше — сплиты,
-//! сайдбары (outline/backlinks/tеги), палитры команд.
+//! Состояние M1: дерево, вкладки с редакторами, автосейв, статус-бар.
+//! Дальше — сплиты, сайдбары (outline/backlinks/теги), палитры команд.
 
 use std::collections::HashSet;
 
-use dunite_editor::Buffer;
+use dunite_editor::Editor;
 use dunite_settings::Settings;
 use dunite_vault::{NoteId, Vault};
 use gpui::{Context, FocusHandle, FontWeight, Render, Window, div, prelude::*, px};
 
 use crate::actions::{CloseTab, NextTab, PrevTab, Quit};
+use crate::editor_element::PaintState;
+use crate::editor_pane::ClickTracker;
 use crate::theme::Palette;
 
 /// Открытая вкладка.
 pub struct Tab {
     pub note_id: NoteId,
-    pub buffer: Buffer,
+    pub editor: Editor,
 }
 
 /// Рабочая область dunite.
@@ -29,7 +31,17 @@ pub struct Workspace {
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active_tab: usize,
     pub(crate) status_message: String,
-    focus_handle: FocusHandle,
+    /// Скролл панели редактора (пиксели контента).
+    pub(crate) scroll_px: f32,
+    /// Геометрия последнего рендера (hit-testing мыши).
+    pub(crate) paint_state: Option<PaintState>,
+    /// Идёт выделение мышью (drag).
+    pub(crate) selecting: bool,
+    /// Распознавание двойного/тройного клика.
+    pub(crate) click: ClickTracker,
+    pub(crate) focus_handle: FocusHandle,
+    /// Поколение правок: автосейв пишет только последнее.
+    pub(crate) save_generation: u64,
 }
 
 impl Workspace {
@@ -43,7 +55,12 @@ impl Workspace {
             tabs: Vec::new(),
             active_tab: 0,
             status_message: String::new(),
+            scroll_px: 0.,
+            paint_state: None,
+            selecting: false,
+            click: ClickTracker::default(),
             focus_handle,
+            save_generation: 0,
         }
     }
 
@@ -63,9 +80,10 @@ impl Workspace {
             Ok(text) => {
                 self.tabs.push(Tab {
                     note_id: NoteId::new(rel_path),
-                    buffer: Buffer::from_text(text),
+                    editor: Editor::from_text(text),
                 });
                 self.active_tab = self.tabs.len() - 1;
+                self.scroll_px = 0.;
                 self.status_message.clear();
             }
             Err(err) => {
@@ -78,6 +96,7 @@ impl Workspace {
     pub(crate) fn activate_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix < self.tabs.len() {
             self.active_tab = ix;
+            self.scroll_px = 0.;
             cx.notify();
         }
     }
@@ -86,6 +105,7 @@ impl Workspace {
         if ix >= self.tabs.len() {
             return;
         }
+        self.save_tab_now(ix);
         self.tabs.remove(ix);
         if self.tabs.is_empty() {
             self.active_tab = 0;
@@ -104,6 +124,7 @@ impl Workspace {
     pub(crate) fn activate_next_tab(&mut self, cx: &mut Context<Self>) {
         if !self.tabs.is_empty() {
             self.active_tab = (self.active_tab + 1) % self.tabs.len();
+            self.scroll_px = 0.;
             cx.notify();
         }
     }
@@ -111,6 +132,7 @@ impl Workspace {
     pub(crate) fn activate_prev_tab(&mut self, cx: &mut Context<Self>) {
         if !self.tabs.is_empty() {
             self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+            self.scroll_px = 0.;
             cx.notify();
         }
     }
@@ -148,7 +170,7 @@ impl Workspace {
             )
     }
 
-    /// Центральная колонка: панель вкладок + панель текста.
+    /// Центральная колонка: панель вкладок + панель редактора.
     fn render_editor_column(&self, cx: &Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -156,7 +178,7 @@ impl Workspace {
             .flex_1()
             .min_w_0()
             .child(self.render_tab_bar(cx))
-            .child(self.render_text_area(cx))
+            .child(self.render_editor_pane(cx))
     }
 }
 
@@ -168,7 +190,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CloseTab, _window, cx| this.close_active_tab(cx)))
             .on_action(cx.listener(|this, _: &NextTab, _window, cx| this.activate_next_tab(cx)))
             .on_action(cx.listener(|this, _: &PrevTab, _window, cx| this.activate_prev_tab(cx)))
-            .on_action(|_: &Quit, window, _cx| window.remove_window())
+            .on_action(cx.listener(|this, _: &Quit, window, _cx| {
+                // все несохранённые вкладки пишем на диск (SPEC §10.3)
+                this.save_all();
+                window.remove_window();
+            }))
             .size_full()
             .flex()
             .flex_col()

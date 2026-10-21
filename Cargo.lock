@@ -1484,7 +1484,9 @@ name = "dunite-editor"
 version = "0.1.0"
 dependencies = [
  "dunite-markdown",
+ "proptest",
  "ropey",
+ "unicode-segmentation",
 ]
 
 [[package]]

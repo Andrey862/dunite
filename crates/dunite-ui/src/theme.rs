@@ -16,6 +16,12 @@ pub struct Palette {
     pub tab_bar: Hsla,
     pub tab_active: Hsla,
     pub status_bar: Hsla,
+    /// Фон выделения текста.
+    pub selection: Hsla,
+    /// Цвет курсора.
+    pub cursor: Hsla,
+    /// Фон колонки нумерации строк.
+    pub gutter: Hsla,
 }
 
 fn c(hex: u32) -> Hsla {
@@ -36,6 +42,9 @@ impl Palette {
                 tab_bar: c(0xe9e9e9),
                 tab_active: c(0xfafafa),
                 status_bar: c(0xe9e9e9),
+                selection: c(0xbdd7ff),
+                cursor: c(0x1f1f1f),
+                gutter: c(0xf3f3f3),
             },
             Theme::Dark => Self {
                 background: c(0x1e1e1e),
@@ -48,6 +57,9 @@ impl Palette {
                 tab_bar: c(0x252526),
                 tab_active: c(0x1e1e1e),
                 status_bar: c(0x252526),
+                selection: c(0x264f78),
+                cursor: c(0xdcdcdc),
+                gutter: c(0x232323),
             },
         }
     }

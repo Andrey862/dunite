@@ -1,7 +1,7 @@
 //! Статус-бар (SPEC §9.5).
 //!
-//! M0: корень хранилища, счётчики, активная заметка, статусное сообщение.
-//! Дальше: git-статус, состояние индекса, позиция курсора.
+//! M1: корень хранилища, счётчики, позиция курсора, статусное сообщение.
+//! Дальше: git-статус, состояние индекса.
 
 use gpui::{div, prelude::*, px};
 
@@ -9,10 +9,19 @@ use crate::workspace::Workspace;
 
 impl Workspace {
     pub(crate) fn render_status_bar(&self) -> impl IntoElement {
-        let (note_label, line_label) = match self.tabs.get(self.active_tab) {
+        let (note_label, cursor_label) = match self.tabs.get(self.active_tab) {
             Some(tab) => (
-                tab.note_id.as_str().to_string(),
-                format!("{} строк", tab.buffer.len_lines()),
+                format!(
+                    "{}{}",
+                    tab.note_id.as_str(),
+                    if tab.editor.is_dirty() { " •" } else { "" }
+                ),
+                format!(
+                    "Ln {}, Col {} · {} строк",
+                    tab.editor.cursor_line() + 1,
+                    tab.editor.cursor_col() + 1,
+                    tab.editor.buffer().len_lines()
+                ),
             ),
             None => ("—".to_string(), String::new()),
         };
@@ -35,7 +44,7 @@ impl Workspace {
                 self.settings.theme.name()
             ))
             .child(note_label)
-            .child(line_label)
+            .child(cursor_label)
             .child(self.status_message.clone())
     }
 }

@@ -1,6 +1,7 @@
 //! Панель вкладок (SPEC §9.2).
 //!
-//! M0: переключение и закрытие кликом. Дальше: reorder, pin, закрытие колёсиком.
+//! M1: переключение, закрытие, индикатор несохранённых изменений.
+//! Дальше: reorder, pin, закрытие колёсиком.
 
 use gpui::{Context, div, prelude::*, px};
 
@@ -17,6 +18,7 @@ impl Workspace {
             .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
                 let is_active = ix == self.active_tab;
                 let title = tab.note_id.file_stem().to_string();
+                let dirty = tab.editor.is_dirty();
                 let palette = self.palette;
 
                 div()
@@ -37,6 +39,14 @@ impl Workspace {
                         cx.listener(move |this, _event, _window, cx| this.activate_tab(ix, cx)),
                     )
                     .child(div().text_size(px(13.)).child(title))
+                    .when(dirty, |tab| {
+                        tab.child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(palette.accent)
+                                .child("•"),
+                        )
+                    })
                     .child(
                         div()
                             .id(("tab-close", ix))

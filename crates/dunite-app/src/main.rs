@@ -6,10 +6,10 @@ use std::path::PathBuf;
 
 use dunite_settings::Settings;
 use dunite_ui::Workspace;
-use dunite_ui::actions::{CloseTab, NextTab, PrevTab, Quit};
+use dunite_ui::{global_key_bindings, key_bindings};
 use dunite_vault::Vault;
 use gpui::{
-    App, AppContext, Application, Bounds, KeyBinding, SharedString, TitlebarOptions, WindowBounds,
+    App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions, px, size,
 };
 use tracing::{error, info};
@@ -47,12 +47,8 @@ fn main() {
     let window_title: SharedString = format!("dunite — {}", vault.root().display()).into();
 
     Application::new().run(move |cx: &mut App| {
-        cx.bind_keys([
-            KeyBinding::new("ctrl-w", CloseTab, None),
-            KeyBinding::new("ctrl-tab", NextTab, None),
-            KeyBinding::new("ctrl-shift-tab", PrevTab, None),
-            KeyBinding::new("ctrl-q", Quit, None),
-        ]);
+        cx.bind_keys(global_key_bindings());
+        cx.bind_keys(key_bindings());
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
