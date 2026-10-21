@@ -403,7 +403,12 @@ impl Workspace {
 
     /// Доскроллить так, чтобы курсор был виден.
     pub(crate) fn scroll_cursor_into_view(&mut self) {
-        self.ensure_layout();
+        let width = self
+            .paint_state
+            .as_ref()
+            .map(|paint| paint.bounds.size.width.to_f64() as f32)
+            .unwrap_or(800.);
+        self.ensure_layout(width);
         let viewport_h = self
             .paint_state
             .as_ref()

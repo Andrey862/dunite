@@ -1529,6 +1529,7 @@ dependencies = [
  "dunite-settings",
  "dunite-vault",
  "gpui",
+ "image",
 ]
 
 [[package]]

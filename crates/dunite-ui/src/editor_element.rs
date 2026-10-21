@@ -188,9 +188,27 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        // раскладка (парсинг markdown + позиции строк) — кэшируется в Workspace
-        self.workspace
-            .update(cx, |workspace, _| workspace.ensure_layout());
+        // раскладка (парсинг markdown + позиции строк) — кэшируется в Workspace;
+        // заодно запрашиваем фоновую загрузку картинок (SPEC §7.5)
+        let pane_width = bounds.size.width.to_f64() as f32;
+        self.workspace.update(cx, |workspace, cx| {
+            workspace.ensure_layout(pane_width);
+            let missing: Vec<String> = workspace
+                .layout
+                .as_ref()
+                .map(|layout| {
+                    layout
+                        .images
+                        .iter()
+                        .map(|(_, target)| target.clone())
+                        .filter(|target| !workspace.images.contains_key(target))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for target in missing {
+                workspace.load_missing_image(target, cx);
+            }
+        });
 
         let workspace = self.workspace.read(cx);
         let palette = workspace.palette;
@@ -391,6 +409,16 @@ impl Element for EditorElement {
     ) {
         let palette = self.workspace.read(cx).palette;
         let gutter_width = px(GUTTER_WIDTH_PX);
+        let text_left = bounds.left() + gutter_width + px(TEXT_PADDING_PX);
+        let avail_width =
+            (bounds.size.width - gutter_width - px(2. * TEXT_PADDING_PX)).to_f64() as f32;
+        let image_targets: std::collections::HashMap<usize, String> = self
+            .workspace
+            .read(cx)
+            .layout
+            .as_ref()
+            .map(|layout| layout.images.iter().cloned().collect())
+            .unwrap_or_default();
 
         // фон колонки нумерации
         window.paint_quad(fill(
@@ -437,6 +465,28 @@ impl Element for EditorElement {
                     cx,
                 )
                 .ok();
+
+            // standalone-картинки строк (SPEC §8.2)
+            if let Some(target) = image_targets.get(&row.geom.line_ix) {
+                let workspace = self.workspace.read(cx);
+                if let Some((image_w, image_h)) = workspace.image_display_size(target, avail_width)
+                    && let Some(crate::workspace::ImageState::Loaded { render, .. }) =
+                        workspace.images.get(target)
+                {
+                    window
+                        .paint_image(
+                            Bounds::new(
+                                point(text_left, origin.y + px(24.)),
+                                size(px(image_w), px(image_h)),
+                            ),
+                            (px(0.)).into(),
+                            render.clone(),
+                            0,
+                            false,
+                        )
+                        .ok();
+                }
+            }
         }
 
         if self.workspace.read(cx).focus_handle.is_focused(window) {

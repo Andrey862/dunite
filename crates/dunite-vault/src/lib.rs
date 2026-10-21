@@ -154,6 +154,24 @@ impl Vault {
             })
             .map(|entry| entry.note_id())
     }
+
+    /// Ищет файл (в т.ч. вложение) по имени — упрощённый резолвинг embeds.
+    pub fn find_file_by_name(&self, name: &str) -> Option<String> {
+        fn walk<'a>(entries: &'a [VaultEntry], name: &str) -> Option<&'a VaultEntry> {
+            for entry in entries {
+                if entry.name == name {
+                    return Some(entry);
+                }
+                if entry.is_folder() {
+                    if let Some(found) = walk(&entry.children, name) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        walk(&self.tree, name).map(|entry| entry.rel_path.clone())
+    }
 }
 
 #[derive(Default)]

@@ -3,20 +3,32 @@
 //! Состояние M1: дерево, вкладки с редакторами, автосейв, статус-бар.
 //! Дальше — сплиты, сайдбары (outline/backlinks/теги), палитры команд.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use dunite_editor::Editor;
 use dunite_markdown::ParsedNote;
 use dunite_settings::Settings;
 use dunite_vault::{NoteId, Vault};
-use gpui::{Context, FocusHandle, FontWeight, Render, Window, div, prelude::*, px};
+use gpui::{Context, FocusHandle, FontWeight, Render, RenderImage, Window, div, prelude::*, px};
 
 use crate::actions::{CloseTab, NextTab, PrevTab, Quit};
 use crate::decor;
 use crate::editor_element::PaintState;
 use crate::editor_pane::ClickTracker;
+use crate::images;
 use crate::theme::Palette;
+
+/// Состояние загрузки изображения (SPEC §7.5).
+pub enum ImageState {
+    Loading,
+    Loaded {
+        render: std::sync::Arc<RenderImage>,
+        width: u32,
+        height: u32,
+    },
+    Failed,
+}
 
 /// Кэш раскладки редактора (SPEC §8.2): парсинг markdown и позиции строк.
 ///
@@ -24,11 +36,15 @@ use crate::theme::Palette;
 /// отдельных блоков — будущая оптимизация; полный парсинг заметки быстр.
 pub struct EditorLayout {
     pub version: u64,
+    /// Ширина панели, для которой посчитаны размеры картинок.
+    pub width: f32,
     pub parsed: ParsedNote,
     /// Верх каждой строки (пиксели контента) + итоговая высота.
     pub tops: Rc<Vec<f32>>,
     /// Высоты строк.
     pub heights: Rc<Vec<f32>>,
+    /// Строки со standalone-картинками: (номер строки, цель embed).
+    pub images: Vec<(usize, String)>,
 }
 
 /// Открытая вкладка.
@@ -53,6 +69,8 @@ pub struct Workspace {
     pub(crate) paint_state: Option<PaintState>,
     /// Кэш раскладки (парсинг + вертикальные позиции строк).
     pub(crate) layout: Option<EditorLayout>,
+    /// Кэш изображений по цели embed.
+    pub(crate) images: HashMap<String, ImageState>,
     /// Идёт выделение мышью (drag).
     pub(crate) selecting: bool,
     /// Распознавание двойного/тройного клика.
@@ -76,6 +94,7 @@ impl Workspace {
             scroll_px: 0.,
             paint_state: None,
             layout: None,
+            images: HashMap::new(),
             selecting: false,
             click: ClickTracker::default(),
             focus_handle,
@@ -164,8 +183,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Пересчитывает кэш раскладки, если буфер изменился.
-    pub(crate) fn ensure_layout(&mut self) {
+    /// Пересчитывает кэш раскладки, если буфер или ширина изменились.
+    pub(crate) fn ensure_layout(&mut self, width: f32) {
         let Some(tab) = self.tabs.get(self.active_tab) else {
             self.layout = None;
             return;
@@ -174,7 +193,7 @@ impl Workspace {
         if self
             .layout
             .as_ref()
-            .is_some_and(|layout| layout.version == version)
+            .is_some_and(|layout| layout.version == version && (layout.width - width).abs() < 2.)
         {
             return;
         }
@@ -184,6 +203,7 @@ impl Workspace {
         let total_lines = buffer.len_lines();
 
         let mut heights = Vec::with_capacity(total_lines);
+        let mut images = Vec::new();
         for line_ix in 0..total_lines {
             let line_start = buffer.line_start(line_ix);
             let kind = parsed
@@ -191,7 +211,34 @@ impl Workspace {
                 .iter()
                 .find(|block| block.range.start <= line_start && line_start < block.range.end)
                 .map(|block| &block.kind);
-            heights.push(decor::line_metrics(kind).0);
+            let mut height = decor::line_metrics(kind).0;
+
+            // строки со standalone-картинками (SPEC §8.2)
+            let content = buffer.line_content_range(line_ix);
+            let line_text = buffer.line(line_ix);
+            if let Some(target) = decor::standalone_image_target(&parsed, &content, &line_text) {
+                let target_text = buffer.slice(target);
+                height = match self.images.get(&target_text) {
+                    Some(ImageState::Loaded {
+                        width: w,
+                        height: h,
+                        ..
+                    }) => {
+                        let (_, display_h) = images::fit_size(
+                            *w,
+                            *h,
+                            width
+                                - crate::editor_element::GUTTER_WIDTH_PX
+                                - 2. * crate::editor_element::TEXT_PADDING_PX,
+                            images::MAX_IMAGE_HEIGHT,
+                        );
+                        height + display_h + 8.
+                    }
+                    _ => height + 8.,
+                };
+                images.push((line_ix, target_text));
+            }
+            heights.push(height);
         }
         let mut tops = Vec::with_capacity(total_lines + 1);
         let mut acc = 0.;
@@ -203,10 +250,76 @@ impl Workspace {
 
         self.layout = Some(EditorLayout {
             version,
+            width,
             parsed,
             heights: Rc::new(heights),
             tops: Rc::new(tops),
+            images,
         });
+    }
+
+    /// Отображаемый размер картинки строки (ширина, высота в px).
+    pub(crate) fn image_display_size(&self, target: &str, avail_width: f32) -> Option<(f32, f32)> {
+        match self.images.get(target)? {
+            ImageState::Loaded { width, height, .. } => Some(images::fit_size(
+                *width,
+                *height,
+                avail_width,
+                images::MAX_IMAGE_HEIGHT,
+            )),
+            _ => None,
+        }
+    }
+
+    /// Резолвит цель embed в путь файла (SPEC §7.5).
+    pub(crate) fn resolve_image_path(&self, target: &str) -> Option<std::path::PathBuf> {
+        let direct = self.vault.absolute(target);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        let name = std::path::Path::new(target)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())?;
+        self.vault
+            .find_file_by_name(&name)
+            .map(|rel| self.vault.absolute(&rel))
+    }
+
+    /// Запускает фоновую загрузку изображения (однократно на цель).
+    pub(crate) fn load_missing_image(&mut self, target: String, cx: &mut Context<Self>) {
+        if self.images.contains_key(&target) {
+            return;
+        }
+        let Some(path) = self.resolve_image_path(&target) else {
+            self.images.insert(target, ImageState::Failed);
+            return;
+        };
+        self.images.insert(target.clone(), ImageState::Loading);
+        cx.spawn(async move |this, cx| {
+            let decoded = cx
+                .background_executor()
+                .spawn(async move {
+                    let bytes = std::fs::read(path).ok()?;
+                    images::decode_image(&bytes)
+                })
+                .await;
+            this.update(cx, |workspace, cx| {
+                let state = match decoded {
+                    Some(decoded) => ImageState::Loaded {
+                        render: decoded.render,
+                        width: decoded.width,
+                        height: decoded.height,
+                    },
+                    None => ImageState::Failed,
+                };
+                workspace.images.insert(target, state);
+                // высоты строк изменились
+                workspace.layout = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Индекс активного блока (блок с курсором) в кэше раскладки.

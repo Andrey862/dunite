@@ -111,6 +111,49 @@ pub struct LineDecor {
 pub const DEFAULT_HEIGHT: f32 = 20.;
 pub const DEFAULT_FONT_SIZE: f32 = 13.;
 
+/// Цель standalone-картинки на строке (строка целиком занята embed'ом).
+///
+/// `line_text` — содержимое строки; возвращает char-диапазон цели embed'а.
+pub fn standalone_image_target(
+    parsed: &ParsedNote,
+    line_range: &Range<usize>,
+    line_text: &str,
+) -> Option<Range<usize>> {
+    let mut found = None;
+    for block in &parsed.blocks {
+        if block.range.end <= line_range.start || block.range.start >= line_range.end {
+            continue;
+        }
+        for inline in &block.inlines {
+            let is_image = matches!(
+                inline,
+                Inline::WikiLink { embed: true, .. } | Inline::MarkdownLink { image: true, .. }
+            );
+            if !is_image {
+                continue;
+            }
+            let range = inline.range();
+            if range.start < line_range.start || range.end > line_range.end {
+                continue;
+            }
+            // embed — единственное содержимое строки (кроме пробелов)
+            let before = range.start - line_range.start;
+            let after = range.end - line_range.start;
+            let only_embed = line_text.chars().take(before).all(|c| c.is_whitespace())
+                && line_text.chars().skip(after).all(|c| c.is_whitespace());
+            if only_embed && found.is_none() {
+                found = Some(match inline {
+                    Inline::WikiLink { target, .. } | Inline::MarkdownLink { target, .. } => {
+                        target.clone()
+                    }
+                    _ => unreachable!("checked is_image"),
+                });
+            }
+        }
+    }
+    found
+}
+
 /// Высота и размер шрифта строки по типу блока.
 pub fn line_metrics(kind: Option<&BlockKind>) -> (f32, f32) {
     match kind {
