@@ -35,6 +35,8 @@ pub struct RowGeom {
     pub pieces: Vec<PieceGeom>,
     pub y: Pixels,
     pub height: Pixels,
+    /// Char-диапазон содержимого строки в исходнике.
+    pub line_chars: Range<usize>,
     pub quads: Vec<QuadGeom>,
 }
 
@@ -53,7 +55,7 @@ impl RowGeom {
 
     /// Char-смещение исходника для видимого byte-смещения.
     pub fn char_for_vis_byte(&self, byte: usize) -> Option<usize> {
-        char_for_vis(&self.pieces, &self.vis_text, byte)
+        char_for_vis(&self.pieces, &self.vis_text, byte, &self.line_chars)
     }
 }
 
@@ -73,7 +75,19 @@ pub fn vis_byte_for(pieces: &[PieceGeom], vis_text: &str, char_off: usize) -> us
 }
 
 /// Char-смещение исходника для видимого byte-смещения.
-pub fn char_for_vis(pieces: &[PieceGeom], vis_text: &str, byte: usize) -> Option<usize> {
+///
+/// Клики мимо видимого текста (за его пределами) попадают на границы
+/// СТРОКИ, а не ближайшего куска: иначе пустое поле правее ссылки
+/// попадает в её диапазон (последний кусок может быть скрыт).
+pub fn char_for_vis(
+    pieces: &[PieceGeom],
+    vis_text: &str,
+    byte: usize,
+    line_chars: &Range<usize>,
+) -> Option<usize> {
+    if pieces.is_empty() {
+        return Some(line_chars.start);
+    }
     for piece in pieces {
         if byte < piece.vis.start {
             return Some(piece.char.start);
@@ -83,7 +97,7 @@ pub fn char_for_vis(pieces: &[PieceGeom], vis_text: &str, byte: usize) -> Option
             return Some(piece.char.start + col);
         }
     }
-    pieces.last().map(|piece| piece.char.end)
+    Some(line_chars.end)
 }
 
 /// Геометрия последнего рендера панели — используется обработчиками мыши.
@@ -243,8 +257,23 @@ impl Element for EditorElement {
         let tops = layout.tops.clone();
         let scroll_px = workspace.scroll_px;
 
-        // активный блок (его маркеры не скрываются, SPEC §8.2)
-        let active_block = workspace.active_block_index();
+        // раскрытие маркеров (SPEC §8.2): блок с курсором и блоки выделения.
+        // При мышином выделении раскрытие — только после отпускания кнопки,
+        // чтобы текст не прыгал в процессе выделения.
+        let selection = editor.selection().range();
+        let mut revealed: Vec<usize> = Vec::new();
+        if !workspace.selecting {
+            if let Some(ix) = workspace.active_block_index() {
+                revealed.push(ix);
+            }
+            if !selection.is_empty() {
+                for (ix, block) in layout.parsed.blocks.iter().enumerate() {
+                    if block.range.start < selection.end && selection.start < block.range.end {
+                        revealed.push(ix);
+                    }
+                }
+            }
+        }
 
         // видимые строки
         let safe_total = total_lines.min(tops.len().saturating_sub(1));
@@ -269,13 +298,11 @@ impl Element for EditorElement {
         }
         let last_line = (last_line + 1).min(safe_total);
 
-        let selection = editor.selection().range();
-
         for line_ix in first_line..last_line {
             let content = buffer.line_content_range(line_ix);
             let line_text = buffer.line(line_ix);
             let decor =
-                decor::decorate_line(&layout.parsed, content.clone(), &line_text, active_block);
+                decor::decorate_line(&layout.parsed, content.clone(), &line_text, &revealed);
 
             let y = px(tops.get(line_ix).copied().unwrap_or(0.) - scroll_px);
             let height = px(decor.height);
@@ -384,6 +411,7 @@ impl Element for EditorElement {
                     pieces,
                     y,
                     height,
+                    line_chars: content,
                     quads: Vec::new(),
                 },
                 gutter_shaped,
@@ -421,80 +449,86 @@ impl Element for EditorElement {
             .map(|layout| layout.images.iter().cloned().collect())
             .unwrap_or_default();
 
-        // фон колонки нумерации
-        window.paint_quad(fill(
-            Bounds::new(bounds.origin, size(gutter_width, bounds.size.height)),
-            palette.gutter,
-        ));
-
-        // фоновые декорации (code-блоки, frontmatter, hr, полосы цитат)
-        for quad in mem::take(&mut prepaint.quads) {
-            let color = match quad.kind {
-                LineQuad::Rule => palette.border,
-                LineQuad::QuoteBar => palette.text_muted,
-                LineQuad::CodeBg => palette.panel,
-                LineQuad::FrontmatterBg => palette.hover,
-            };
-            window.paint_quad(fill(quad.bounds, color));
-        }
-
-        for quad in mem::take(&mut prepaint.selections) {
-            window.paint_quad(quad);
-        }
-
         let rows = mem::take(&mut prepaint.rows);
-        for row in &rows {
-            let origin = point(bounds.left(), bounds.top() + row.geom.y);
-            let center = (row.geom.height.to_f64() as f32 - 16.) / 2.;
-            row.gutter_shaped
-                .paint(
-                    point(
-                        origin.x + px(TEXT_PADDING_PX),
-                        origin.y + px(center.max(0.)),
-                    ),
-                    px(16.),
-                    window,
-                    cx,
-                )
-                .ok();
-            row.geom
-                .shaped
-                .paint(
-                    point(origin.x + gutter_width + px(TEXT_PADDING_PX), origin.y),
-                    row.geom.height,
-                    window,
-                    cx,
-                )
-                .ok();
 
-            // standalone-картинки строк (SPEC §8.2)
-            if let Some(target) = image_targets.get(&row.geom.line_ix) {
-                let workspace = self.workspace.read(cx);
-                if let Some((image_w, image_h)) = workspace.image_display_size(target, avail_width)
-                    && let Some(crate::workspace::ImageState::Loaded { render, .. }) =
-                        workspace.images.get(target)
-                {
-                    window
-                        .paint_image(
-                            Bounds::new(
-                                point(text_left, origin.y + px(24.)),
-                                size(px(image_w), px(image_h)),
-                            ),
-                            (px(0.)).into(),
-                            render.clone(),
-                            0,
-                            false,
-                        )
-                        .ok();
+        // весь рендер клиппится по границам панели: без маски строки (номера,
+        // текст, картинки) вылезают на таб-бар и статус-бар (SPEC §8.4)
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            // фон колонки нумерации
+            window.paint_quad(fill(
+                Bounds::new(bounds.origin, size(gutter_width, bounds.size.height)),
+                palette.gutter,
+            ));
+
+            // фоновые декорации (code-блоки, frontmatter, hr, полосы цитат)
+            for quad in mem::take(&mut prepaint.quads) {
+                let color = match quad.kind {
+                    LineQuad::Rule => palette.border,
+                    LineQuad::QuoteBar => palette.text_muted,
+                    LineQuad::CodeBg => palette.panel,
+                    LineQuad::FrontmatterBg => palette.hover,
+                };
+                window.paint_quad(fill(quad.bounds, color));
+            }
+
+            for quad in mem::take(&mut prepaint.selections) {
+                window.paint_quad(quad);
+            }
+
+            for row in &rows {
+                let origin = point(bounds.left(), bounds.top() + row.geom.y);
+                let center = (row.geom.height.to_f64() as f32 - 16.) / 2.;
+                row.gutter_shaped
+                    .paint(
+                        point(
+                            origin.x + px(TEXT_PADDING_PX),
+                            origin.y + px(center.max(0.)),
+                        ),
+                        px(16.),
+                        window,
+                        cx,
+                    )
+                    .ok();
+                row.geom
+                    .shaped
+                    .paint(
+                        point(origin.x + gutter_width + px(TEXT_PADDING_PX), origin.y),
+                        row.geom.height,
+                        window,
+                        cx,
+                    )
+                    .ok();
+
+                // standalone-картинки строк (SPEC §8.2)
+                if let Some(target) = image_targets.get(&row.geom.line_ix) {
+                    let workspace = self.workspace.read(cx);
+                    if let Some((image_w, image_h)) =
+                        workspace.image_display_size(target, avail_width)
+                        && let Some(crate::workspace::ImageState::Loaded { render, .. }) =
+                            workspace.images.get(target)
+                    {
+                        window
+                            .paint_image(
+                                Bounds::new(
+                                    point(text_left, origin.y + px(24.)),
+                                    size(px(image_w), px(image_h)),
+                                ),
+                                (px(0.)).into(),
+                                render.clone(),
+                                0,
+                                false,
+                            )
+                            .ok();
+                    }
                 }
             }
-        }
 
-        if self.workspace.read(cx).focus_handle.is_focused(window) {
-            if let Some(cursor) = prepaint.cursor.take() {
-                window.paint_quad(cursor);
+            if self.workspace.read(cx).focus_handle.is_focused(window) {
+                if let Some(cursor) = prepaint.cursor.take() {
+                    window.paint_quad(cursor);
+                }
             }
-        }
+        });
 
         // сохраняем геометрию для hit-testing мышью
         let geom_rows: Vec<RowGeom> = rows.into_iter().map(|row| row.geom).collect();
@@ -578,5 +612,46 @@ pub fn byte_of_col(line_text: &str, col: usize) -> usize {
 /// Char-колонка byte-смещения внутри строки.
 pub fn col_of_byte(line_text: &str, byte_ix: usize) -> usize {
     let byte_ix = byte_ix.min(line_text.len());
-    line_text[..byte_ix].chars().count()
+    line_text
+        .get(..byte_ix)
+        .unwrap_or(line_text)
+        .chars()
+        .count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn piece(vis: Range<usize>, char: Range<usize>) -> PieceGeom {
+        PieceGeom { vis, char }
+    }
+
+    #[test]
+    fn click_beyond_text_maps_to_line_end_not_link() {
+        // строка "link: [[Alpha]]" (15 символов): видимо «link: Alpha»;
+        // клик в пустое поле правее текста не должен попадать в ссылку 6..15
+        let pieces = vec![
+            piece(0..6, 0..6),   // "link: "
+            piece(6..11, 8..13), // "Alpha" — внутри скрытых [[ ]]
+        ];
+        let vis_text = "link: Alpha";
+        let line_chars = 0..15;
+
+        // правее всего → конец строки: 15 не входит в ссылку 6..15
+        assert_eq!(
+            char_for_vis(&pieces, vis_text, vis_text.len(), &line_chars),
+            Some(15)
+        );
+        // левее всего → начало строки
+        assert_eq!(char_for_vis(&pieces, vis_text, 0, &line_chars), Some(0));
+        // клик по видимой «Alpha» → позиция внутри ссылки (ожидаемо)
+        assert_eq!(char_for_vis(&pieces, vis_text, 7, &line_chars), Some(9));
+    }
+
+    #[test]
+    fn click_on_empty_line_maps_to_line_start() {
+        assert_eq!(char_for_vis(&[], "", 0, &(0..0)), Some(0));
+        assert_eq!(char_for_vis(&[], "", 5, &(3..3)), Some(3));
+    }
 }

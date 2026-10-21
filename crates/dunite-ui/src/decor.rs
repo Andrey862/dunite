@@ -173,18 +173,19 @@ pub fn line_metrics(kind: Option<&BlockKind>) -> (f32, f32) {
 // ── построение декораций ─────────────────────────────────────────────────
 
 /// Декорирует строку: `line_range` — char-диапазон содержимого строки,
-/// `active_block` — индекс блока с курсором (его маркеры не скрываются).
+/// `revealed_blocks` — индексы блоков, чьи маркеры показаны (блок с курсором
+/// и блоки выделения; SPEC §8.2).
 pub fn decorate_line(
     parsed: &ParsedNote,
     line_range: Range<usize>,
     line_text: &str,
-    active_block: Option<usize>,
+    revealed_blocks: &[usize],
 ) -> LineDecor {
     let block_ix = parsed.blocks.iter().position(|block| {
         block.range.start <= line_range.start && line_range.start < block.range.end
     });
     let block = block_ix.and_then(|ix| parsed.blocks.get(ix));
-    let active = block_ix.is_some_and(|ix| Some(ix) == active_block);
+    let active = block_ix.is_some_and(|ix| revealed_blocks.contains(&ix));
 
     let (height, font_size) = line_metrics(block.map(|b| &b.kind));
     let base_style = match block.map(|b| &b.kind) {
@@ -518,8 +519,8 @@ mod tests {
     fn decor_for(text: &str, cursor: usize) -> (ParsedNote, LineDecor) {
         let parsed = dunite_markdown::parse(text);
         let line_range = 0..text.trim_end_matches('\n').chars().count();
-        let active = parsed.block_index_at(cursor);
-        let decor = decorate_line(&parsed, line_range, text.trim_end_matches('\n'), active);
+        let revealed: Vec<usize> = parsed.block_index_at(cursor).into_iter().collect();
+        let decor = decorate_line(&parsed, line_range, text.trim_end_matches('\n'), &revealed);
         (parsed, decor)
     }
 
@@ -543,7 +544,7 @@ mod tests {
     fn heading_marker_hidden_when_inactive() {
         let text = "# Заголовок\nтекст\n";
         let parsed = dunite_markdown::parse(text);
-        let decor = decorate_line(&parsed, 0..11, "# Заголовок", Some(1));
+        let decor = decorate_line(&parsed, 0..11, "# Заголовок", &[]);
         // блок неактивен: `# ` скрыт, видно только текст
         assert_eq!(decor.pieces.len(), 1);
         assert_eq!(decor.pieces[0].text, "Заголовок");
@@ -553,7 +554,7 @@ mod tests {
     fn heading_marker_shown_when_active() {
         let text = "# Заголовок\n";
         let parsed = dunite_markdown::parse(text);
-        let decor = decorate_line(&parsed, 0..11, "# Заголовок", Some(0));
+        let decor = decorate_line(&parsed, 0..11, "# Заголовок", &[0]);
         assert_eq!(decor.pieces[0].text, "# ");
         assert_eq!(decor.pieces.len(), 2);
     }
@@ -562,7 +563,7 @@ mod tests {
     fn bold_markers_hidden_when_inactive() {
         let text = "текст **жирный** конец\n";
         let parsed = dunite_markdown::parse(text);
-        let decor = decorate_line(&parsed, 0..22, "текст **жирный** конец", Some(1));
+        let decor = decorate_line(&parsed, 0..22, "текст **жирный** конец", &[]);
         let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(visible, "текст жирный конец");
     }
@@ -571,7 +572,7 @@ mod tests {
     fn bold_markers_shown_when_active() {
         let text = "текст **жирный** конец\n";
         let parsed = dunite_markdown::parse(text);
-        let decor = decorate_line(&parsed, 0..22, "текст **жирный** конец", Some(0));
+        let decor = decorate_line(&parsed, 0..22, "текст **жирный** конец", &[0]);
         let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(visible, "текст **жирный** конец");
     }
@@ -580,7 +581,7 @@ mod tests {
     fn wikilink_shows_display_when_inactive() {
         let text = "[[Alpha|Страница]]\n";
         let parsed = dunite_markdown::parse(text);
-        let decor = decorate_line(&parsed, 0..18, "[[Alpha|Страница]]", Some(1));
+        let decor = decorate_line(&parsed, 0..18, "[[Alpha|Страница]]", &[]);
         let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(visible, "Страница");
     }
@@ -589,7 +590,7 @@ mod tests {
     fn rule_becomes_line() {
         let text = "---\n";
         let parsed = dunite_markdown::parse(text);
-        let decor = decorate_line(&parsed, 0..3, "---", None);
+        let decor = decorate_line(&parsed, 0..3, "---", &[]);
         assert_eq!(decor.quads, vec![LineQuad::Rule]);
         assert!(decor.pieces.iter().all(|p| p.text.is_empty()));
     }
@@ -598,7 +599,7 @@ mod tests {
     fn quote_marker_replaced_with_spaces() {
         let text = "> цитата\n";
         let parsed = dunite_markdown::parse(text);
-        let decor = decorate_line(&parsed, 0..8, "> цитата", Some(1));
+        let decor = decorate_line(&parsed, 0..8, "> цитата", &[]);
         assert!(decor.quads.contains(&LineQuad::QuoteBar));
         assert_eq!(decor.pieces[0].text, "  ");
         let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
@@ -613,12 +614,12 @@ mod tests {
         assert_eq!(parsed.blocks.len(), 2);
 
         // курсор в другом блоке: маркер скрыт
-        let decor = decorate_line(&parsed, 14..25, "# Заголовок", Some(0));
+        let decor = decorate_line(&parsed, 14..25, "# Заголовок", &[]);
         let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(visible, "Заголовок");
 
         // курсор в этом блоке: маркер виден
-        let decor = decorate_line(&parsed, 14..25, "# Заголовок", Some(1));
+        let decor = decorate_line(&parsed, 14..25, "# Заголовок", &[1]);
         let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(visible, "# Заголовок");
     }
@@ -629,7 +630,7 @@ mod tests {
         // паникует; символ заменяется пробелом с сохранением числа символов
         let text = "до\u{85}после\n";
         let parsed = dunite_markdown::parse(text);
-        let decor = decorate_line(&parsed, 0..8, "до\u{85}после", Some(0));
+        let decor = decorate_line(&parsed, 0..8, "до\u{85}после", &[]);
         let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(visible, "до после");
         let total_chars: usize = decor.pieces.iter().map(|p| p.text.chars().count()).sum();
@@ -640,7 +641,7 @@ mod tests {
     fn second_line_plain_text_intact() {
         let text = "aaaa\nbbbb cccc\n";
         let parsed = dunite_markdown::parse(text);
-        let decor = decorate_line(&parsed, 5..14, "bbbb cccc", Some(1));
+        let decor = decorate_line(&parsed, 5..14, "bbbb cccc", &[0]);
         let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(visible, "bbbb cccc");
     }
