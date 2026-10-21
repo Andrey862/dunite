@@ -26,6 +26,19 @@ pub fn parse(text: &str) -> ParsedNote {
     ParsedNote { blocks }
 }
 
+impl ParsedNote {
+    /// Индекс блока, содержащего позицию `probe`.
+    ///
+    /// `probe` — обычно начало строки, на которой стоит курсор: позиция в
+    /// конце строки блока (сразу после `\n`) уже принадлежит следующей
+    /// строке и не «включает» маркеры предыдущего блока.
+    pub fn block_index_at(&self, probe: usize) -> Option<usize> {
+        self.blocks
+            .iter()
+            .position(|block| block.range.start <= probe && probe < block.range.end)
+    }
+}
+
 /// Byte-диапазон → char-диапазон (для тестов и мостов с внешними API).
 pub fn byte_range_to_char(text: &str, range: Range<usize>) -> Range<usize> {
     let start = text[..range.start].chars().count();
@@ -217,6 +230,23 @@ mod tests {
         let text = "заметка ^abc123\n";
         let note = parse(text);
         assert!(matches!(note.blocks[0].inlines[0], Inline::BlockId { .. }));
+    }
+
+    #[test]
+    fn block_index_at_line_semantics() {
+        // «abc\n\ndef\n»: абзац 0..4, пустая строка 4..5, абзац 5..9
+        let note = parse("abc\n\ndef\n");
+        assert_eq!(note.block_index_at(0), Some(0)); // внутри первого
+        assert_eq!(note.block_index_at(3), Some(0)); // конец содержимого первого
+        assert_eq!(note.block_index_at(4), None); // начало пустой строки — не «включает» первый
+        assert_eq!(note.block_index_at(5), Some(1)); // второй абзац
+    }
+
+    #[test]
+    fn block_index_at_eof_without_newline() {
+        // блок без финального \n: курсор в конце текста остаётся в блоке
+        let note = parse("abc");
+        assert_eq!(note.block_index_at(0), Some(0));
     }
 
     #[test]

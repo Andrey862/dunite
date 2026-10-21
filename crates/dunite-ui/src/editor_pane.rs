@@ -479,24 +479,19 @@ impl Workspace {
         None
     }
 
-    /// Находится ли смещение в активном блоке (блоке с курсором).
+    /// Находится ли смещение в активном блоке (блоке со строкой курсора).
     fn block_active_at(&self, offset: usize) -> bool {
         let Some(layout) = self.layout.as_ref() else {
             return false;
         };
-        let Some(cursor) = self
-            .tabs
-            .get(self.active_tab)
-            .map(|tab| tab.editor.selection().head)
-        else {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
             return false;
         };
+        let buffer = tab.editor.buffer();
+        let cursor = tab.editor.selection().head;
         let block_of = |offset: usize| {
-            layout
-                .parsed
-                .blocks
-                .iter()
-                .position(|block| block.range.start <= offset && offset <= block.range.end)
+            let line_start = buffer.line_start(buffer.line_of(offset));
+            layout.parsed.block_index_at(line_start)
         };
         block_of(offset).is_some_and(|ix| Some(ix) == block_of(cursor))
     }

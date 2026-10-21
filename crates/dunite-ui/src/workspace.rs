@@ -325,16 +325,17 @@ impl Workspace {
         .detach();
     }
 
-    /// Индекс активного блока (блок с курсором) в кэше раскладки.
+    /// Индекс активного блока (блок со строкой курсора) в кэше раскладки.
+    ///
+    /// Курсор в конце строки блока относится к следующей строке и не
+    /// «включает» его маркеры (SPEC §8.2).
     pub(crate) fn active_block_index(&self) -> Option<usize> {
         let layout = self.layout.as_ref()?;
         let tab = self.tabs.get(self.active_tab)?;
+        let buffer = tab.editor.buffer();
         let cursor = tab.editor.selection().head;
-        layout
-            .parsed
-            .blocks
-            .iter()
-            .position(|block| block.range.start <= cursor && cursor <= block.range.end)
+        let line_start = buffer.line_start(buffer.line_of(cursor));
+        layout.parsed.block_index_at(line_start)
     }
 
     /// Верхняя панель: имя приложения и корень хранилища.

@@ -518,10 +518,7 @@ mod tests {
     fn decor_for(text: &str, cursor: usize) -> (ParsedNote, LineDecor) {
         let parsed = dunite_markdown::parse(text);
         let line_range = 0..text.trim_end_matches('\n').chars().count();
-        let active = parsed
-            .blocks
-            .iter()
-            .position(|b| b.range.start <= cursor && cursor <= b.range.end);
+        let active = parsed.block_index_at(cursor);
         let decor = decorate_line(&parsed, line_range, text.trim_end_matches('\n'), active);
         (parsed, decor)
     }
