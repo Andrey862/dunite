@@ -247,9 +247,10 @@ impl Element for EditorElement {
         let active_block = workspace.active_block_index();
 
         // видимые строки
+        let safe_total = total_lines.min(tops.len().saturating_sub(1));
         let first_line = {
             let mut lo = 0;
-            let mut hi = total_lines;
+            let mut hi = safe_total;
             let target = scroll_px;
             while lo < hi {
                 let mid = (lo + hi) / 2;
@@ -263,10 +264,10 @@ impl Element for EditorElement {
         };
         let mut last_line = first_line;
         let view_bottom = scroll_px + bounds.size.height.to_f64() as f32;
-        while last_line < total_lines && tops[last_line] < view_bottom {
+        while last_line < safe_total && tops[last_line] < view_bottom {
             last_line += 1;
         }
-        let last_line = (last_line + 1).min(total_lines);
+        let last_line = (last_line + 1).min(safe_total);
 
         let selection = editor.selection().range();
 
@@ -276,7 +277,7 @@ impl Element for EditorElement {
             let decor =
                 decor::decorate_line(&layout.parsed, content.clone(), &line_text, active_block);
 
-            let y = px(tops[line_ix]);
+            let y = px(tops.get(line_ix).copied().unwrap_or(0.));
             let height = px(decor.height);
 
             // собираем видимый текст и куски

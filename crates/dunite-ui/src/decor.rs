@@ -441,12 +441,16 @@ fn inline_style(inline: &Inline) -> SegStyle {
 }
 
 /// Собирает куски: сортирует планы, устраняет пересечения, заполняет пробелы.
+///
+/// `line_range` — глобальный char-диапазон строки; `line_text` — её содержимое,
+/// поэтому срезы идут по смещениям, локальным для строки (`base`).
 fn materialize(
     line_range: Range<usize>,
     line_text: &str,
     mut plans: Vec<Plan>,
     base_style: SegStyle,
 ) -> Vec<Piece> {
+    let base = line_range.start;
     plans.sort_by_key(|plan| plan.range.start);
     let mut pieces = Vec::new();
     let mut pos = line_range.start;
@@ -457,10 +461,17 @@ fn materialize(
         }
         let plan_end = plan.range.end;
         if plan.range.start > pos {
-            pieces.push(text_piece(line_text, pos..plan.range.start, base_style));
+            pieces.push(text_piece(
+                line_text,
+                base,
+                pos..plan.range.start,
+                base_style,
+            ));
         }
         match plan.action {
-            Action::Keep(style) => pieces.push(text_piece(line_text, plan.range.clone(), style)),
+            Action::Keep(style) => {
+                pieces.push(text_piece(line_text, base, plan.range.clone(), style))
+            }
             Action::Replace(text, style) => pieces.push(Piece {
                 char: plan.range,
                 text,
@@ -471,14 +482,14 @@ fn materialize(
         pos = plan_end;
     }
     if pos < line_range.end {
-        pieces.push(text_piece(line_text, pos..line_range.end, base_style));
+        pieces.push(text_piece(line_text, base, pos..line_range.end, base_style));
     }
     pieces
 }
 
-fn text_piece(line_text: &str, range: Range<usize>, style: SegStyle) -> Piece {
-    let from = byte_of_char(line_text, range.start);
-    let to = byte_of_char(line_text, range.end);
+fn text_piece(line_text: &str, base: usize, range: Range<usize>, style: SegStyle) -> Piece {
+    let from = byte_of_char(line_text, range.start - base);
+    let to = byte_of_char(line_text, range.end - base);
     Piece {
         char: range,
         text: line_text[from..to].to_string(),
@@ -581,5 +592,32 @@ mod tests {
         assert_eq!(decor.pieces[0].text, "  ");
         let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(visible, "  цитата");
+    }
+
+    #[test]
+    fn second_line_offsets_are_local() {
+        // регрессия: строки после первой имеют ненулевую глобальную базу
+        let text = "первая строка\n# Заголовок\n";
+        let parsed = dunite_markdown::parse(text);
+        assert_eq!(parsed.blocks.len(), 2);
+
+        // курсор в другом блоке: маркер скрыт
+        let decor = decorate_line(&parsed, 14..25, "# Заголовок", Some(0));
+        let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(visible, "Заголовок");
+
+        // курсор в этом блоке: маркер виден
+        let decor = decorate_line(&parsed, 14..25, "# Заголовок", Some(1));
+        let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(visible, "# Заголовок");
+    }
+
+    #[test]
+    fn second_line_plain_text_intact() {
+        let text = "aaaa\nbbbb cccc\n";
+        let parsed = dunite_markdown::parse(text);
+        let decor = decorate_line(&parsed, 5..14, "bbbb cccc", Some(1));
+        let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(visible, "bbbb cccc");
     }
 }
