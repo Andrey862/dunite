@@ -51,8 +51,7 @@ impl Workspace {
     ) -> Vec<AnyElement> {
         entries
             .iter()
-            .enumerate()
-            .map(|(ix, entry)| {
+            .map(|entry| {
                 let is_folder = entry.is_folder();
                 let expanded = is_folder && self.expanded.contains(&entry.rel_path);
                 let rel_path = entry.rel_path.clone();
@@ -65,8 +64,14 @@ impl Workspace {
                     EntryKind::Other => "□",
                 };
 
+                // ВНИМАНИЕ: id должен быть уникален во всём дереве, а не только
+                // среди соседей. gpui хранит состояние клика (pending_mouse_down)
+                // по глобальному пути id; коллизия id строк разных уровней вложенности
+                // «съедает» клики (один обработчик выбрасывает событие другого).
+                // rel_path уникален — используем его.
+                let row_id: gpui::SharedString = rel_path.clone().into();
                 let row = div()
-                    .id(("tree-row", ix))
+                    .id(row_id)
                     .flex()
                     .items_center()
                     .gap_1p5()
