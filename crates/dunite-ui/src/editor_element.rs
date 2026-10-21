@@ -277,7 +277,7 @@ impl Element for EditorElement {
             let decor =
                 decor::decorate_line(&layout.parsed, content.clone(), &line_text, active_block);
 
-            let y = px(tops.get(line_ix).copied().unwrap_or(0.));
+            let y = px(tops.get(line_ix).copied().unwrap_or(0.) - scroll_px);
             let height = px(decor.height);
 
             // собираем видимый текст и куски

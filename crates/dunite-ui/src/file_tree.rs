@@ -53,6 +53,7 @@ impl Workspace {
             .iter()
             .map(|entry| {
                 let is_folder = entry.is_folder();
+                let kind = entry.kind;
                 let expanded = is_folder && self.expanded.contains(&entry.rel_path);
                 let rel_path = entry.rel_path.clone();
 
@@ -81,10 +82,16 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|style| style.bg(self.palette.hover))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
-                        if is_folder {
+                        if kind.is_folder() {
                             this.toggle_folder(&rel_path, cx);
-                        } else {
+                        } else if kind.is_note() {
                             this.open_note(&rel_path, cx);
+                        } else {
+                            // вложения в редакторе не открываются (SPEC §7.5);
+                            // изображения смотрят в заметках через ![[...]]
+                            this.status_message =
+                                format!("{rel_path}: этот файл нельзя открыть в редакторе");
+                            cx.notify();
                         }
                     }))
                     .child(

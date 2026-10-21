@@ -492,8 +492,22 @@ fn text_piece(line_text: &str, base: usize, range: Range<usize>, style: SegStyle
     let to = byte_of_char(line_text, range.end - base);
     Piece {
         char: range,
-        text: line_text[from..to].to_string(),
+        text: line_text[from..to].chars().map(safe_char).collect(),
         style,
+    }
+}
+
+/// Убирает символы, ломающие шейпер текста (cosmic-text паникует на строках
+/// со смешанными bidi-абзацами: U+0085, U+2029 и управляющие коды).
+/// Число символов сохраняется — сопоставление «курсор ↔ видимый текст»
+/// остаётся корректным.
+fn safe_char(c: char) -> char {
+    if c == '\t' {
+        '\t'
+    } else if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+        ' '
+    } else {
+        c
     }
 }
 
@@ -610,6 +624,19 @@ mod tests {
         let decor = decorate_line(&parsed, 14..25, "# Заголовок", Some(1));
         let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(visible, "# Заголовок");
+    }
+
+    #[test]
+    fn control_chars_sanitized_but_positions_kept() {
+        // U+0085 — bidi-разделитель абзацев: на смешанных строках cosmic-text
+        // паникует; символ заменяется пробелом с сохранением числа символов
+        let text = "до\u{85}после\n";
+        let parsed = dunite_markdown::parse(text);
+        let decor = decorate_line(&parsed, 0..8, "до\u{85}после", Some(0));
+        let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(visible, "до после");
+        let total_chars: usize = decor.pieces.iter().map(|p| p.text.chars().count()).sum();
+        assert_eq!(total_chars, 8);
     }
 
     #[test]
