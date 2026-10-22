@@ -18,6 +18,10 @@ pub struct BacklinkRef {
     pub range: std::ops::Range<usize>,
     /// Char-диапазон текста цели — для перезаписи при переименовании.
     pub target_range: std::ops::Range<usize>,
+    /// Текст цели, как написан в источнике.
+    pub target_text: String,
+    /// Надпись `[[target|display]]`, если есть.
+    pub display: Option<String>,
     /// Строка со ссылкой — фрагмент контекста для панели.
     pub context: String,
     /// Строка ссылки в исходнике (для клика и навигации).
@@ -211,7 +215,15 @@ impl LinkGraph {
                 if ref_.target_range.end > chars.len() {
                     continue;
                 }
-                chars.splice(ref_.target_range.clone(), new_target.chars());
+                // ссылки по алиасу без надписи сохраняют видимый текст:
+                // [[Home]] → [[Новое|Home]] (как в Obsidian); канонические
+                // (имя файла/путь) и уже имеющие надпись переписываются целиком
+                let replacement = match &ref_.display {
+                    Some(_) => new_target.clone(),
+                    None if is_canonical_target(&ref_.target_text, from) => new_target.clone(),
+                    None => format!("{new_target}|{}", ref_.target_text),
+                };
+                chars.splice(ref_.target_range.clone(), replacement.chars());
                 updated += 1;
             }
             let new_text: String = chars.into_iter().collect();
@@ -275,6 +287,8 @@ impl LinkGraph {
                         source: source.clone(),
                         range: link.range,
                         target_range: link.target_range,
+                        target_text: link.target_text,
+                        display: link.display,
                         context: link.context,
                         line: link.line,
                     });
@@ -289,6 +303,15 @@ impl LinkGraph {
 
 fn normalize(name: &str) -> String {
     name.trim().to_lowercase()
+}
+
+/// Цель ссылки — каноническое имя заметки (имя файла или путь), а не алиас.
+fn is_canonical_target(target: &str, id: &NoteId) -> bool {
+    let target = target.trim().to_lowercase();
+    let stem = id.file_stem().to_lowercase();
+    let path = id.as_str().to_lowercase();
+    let path_no_ext = path.strip_suffix(".md").unwrap_or(&path);
+    target == stem || target == path || target == path_no_ext
 }
 
 #[cfg(test)]
@@ -314,7 +337,7 @@ mod tests {
         fs::write(root.join("Проект.md"), "[[Alpha]] дубликат имени\n").unwrap();
         fs::write(
             root.join("Вагон.md"),
-            "[[Несуществующая]] и [[Главная|домой]]\n",
+            "[[Несуществующая]] и [[Главная|домой]] и [[Home]]\n",
         )
         .unwrap();
         let vault = Vault::open(root).unwrap();
@@ -479,5 +502,23 @@ mod tests {
             &NoteId::new("Главная.md"),
         );
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn rename_preserves_alias_display_text() {
+        let (_dir, mut graph, vault) = graph();
+        let from = NoteId::new("Главная.md");
+        let to = NoteId::new("Дом.md");
+        graph.rename_note(&vault, &from, &to).unwrap();
+
+        // алиасная ссылка без надписи сохраняет видимый текст: [[Home]] → [[Дом|Home]]
+        let text = vault.read_note("Вагон.md").unwrap();
+        assert!(text.contains("[[Дом|Home]]"), "{text}");
+        // ссылка с надписью переписывается как есть
+        assert!(text.contains("[[Дом|домой]]"), "{text}");
+
+        // каноническая ссылка (имя файла) переписывается без надписи
+        let alpha = vault.read_note("projects/Alpha.md").unwrap();
+        assert!(alpha.contains("Ссылка на [[Дом]]"), "{alpha}");
     }
 }
