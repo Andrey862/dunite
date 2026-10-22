@@ -35,10 +35,13 @@ impl VaultWatcher {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher = notify::recommended_watcher(tx)?;
         watcher.watch(root, RecursiveMode::Recursive)?;
+        // notify отдаёт события с АБСОЛЮТНЫМИ путями: корень канонизируем,
+        // иначе strip_prefix на относительном корне молча отбрасывал события
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         Ok(Self {
             _watcher: watcher,
             rx,
-            root: root.to_path_buf(),
+            root,
             debounce: Duration::from_millis(300),
             pending: Vec::new(),
             last_event: None,
@@ -102,7 +105,17 @@ impl VaultWatcher {
     /// Относительный путь с `/`-разделителями; None — вне хранилища или
     /// служебный/скрытый файл.
     fn relative_path(&self, path: &Path) -> Option<String> {
-        let relative = path.strip_prefix(&self.root).ok()?;
+        let relative = match path.strip_prefix(&self.root) {
+            Ok(relative) => relative.to_path_buf(),
+            // пути событий могут быть канонизированы (симлинки, относительный
+            // корень) — пробуем отрезать от канонического пути
+            Err(_) => path
+                .canonicalize()
+                .ok()?
+                .strip_prefix(&self.root)
+                .ok()?
+                .to_path_buf(),
+        };
         let parts: Vec<String> = relative
             .components()
             .map(|part| part.as_os_str().to_string_lossy().into_owned())
@@ -170,6 +183,32 @@ mod tests {
         fs::write(dir.path().join(".скрытая.md"), "x").unwrap();
         std::thread::sleep(Duration::from_millis(500));
         assert!(watcher.drain().is_empty());
+    }
+
+    #[test]
+    fn relative_root_yields_events() {
+        // регрессия: notify отдаёт абсолютные пути, а относительный корень
+        // заставлял strip_prefix молча отбрасывать все события
+        let cwd = std::env::current_dir().unwrap();
+        let dir = cwd
+            .join("ignored")
+            .join(format!("watch-rel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let relative_root = dir.strip_prefix(&cwd).unwrap().to_path_buf();
+
+        let mut watcher = VaultWatcher::new(&relative_root).unwrap();
+        fs::write(dir.join("Заметка.md"), "x").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = watcher.drain();
+        std::thread::sleep(Duration::from_millis(400));
+        let events = watcher.drain();
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            events.contains(&VaultEvent::Upsert("Заметка.md".to_string())),
+            "{events:?}"
+        );
     }
 
     #[test]

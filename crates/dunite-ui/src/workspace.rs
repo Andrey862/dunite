@@ -294,11 +294,7 @@ impl Workspace {
         }
         self.save_tab_now(ix);
         self.tabs.remove(ix);
-        if self.tabs.is_empty() {
-            self.active_tab = 0;
-        } else if ix <= self.active_tab {
-            self.active_tab = (self.active_tab - 1).min(self.tabs.len() - 1);
-        }
+        self.active_tab = next_active_tab(self.active_tab, ix, self.tabs.len());
         cx.notify();
     }
 
@@ -560,5 +556,42 @@ impl Render for Workspace {
             )
             .child(self.render_status_bar())
             .children(self.render_palette(cx))
+    }
+}
+
+/// Индекс активной вкладки после закрытия вкладки `closed`.
+///
+/// Закрытие активной вкладки активирует следующую (или последнюю);
+/// закрытие левой сдвигает индекс. Раньше здесь был underflow `usize`,
+/// который ронял приложение при закрытии первой вкладки.
+fn next_active_tab(active: usize, closed: usize, remaining: usize) -> usize {
+    if remaining == 0 {
+        0
+    } else if closed < active {
+        active - 1
+    } else if closed == active {
+        active.min(remaining - 1)
+    } else {
+        active
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_active_tab;
+
+    #[test]
+    fn closing_first_active_tab_does_not_underflow() {
+        // регрессия: (active - 1) при active == 0 паниковал и ронял приложение
+        assert_eq!(next_active_tab(0, 0, 2), 0);
+        assert_eq!(next_active_tab(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn closing_activates_neighbor() {
+        assert_eq!(next_active_tab(2, 2, 2), 1); // закрыта последняя — активируем левую
+        assert_eq!(next_active_tab(1, 1, 2), 1); // активируем следующую
+        assert_eq!(next_active_tab(2, 0, 2), 1); // закрыта левая — индекс сдвигается
+        assert_eq!(next_active_tab(1, 2, 2), 1); // закрыта правая — без изменений
     }
 }

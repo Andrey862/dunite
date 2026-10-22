@@ -8,8 +8,8 @@ use dunite_index::SearchHit;
 use dunite_vault::NoteId;
 use gpui::{
     App, Bounds, Context, Element, ElementId, Entity, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, Pixels, ShapedLine, SharedString, Style, TextRun, Window, div, fill,
-    point, prelude::*, px, relative, size,
+    IntoElement, LayoutId, Pixels, ShapedLine, Style, TextRun, Window, div, fill, point,
+    prelude::*, px, relative, size,
 };
 
 use crate::actions::{
@@ -489,6 +489,7 @@ impl Workspace {
             .shadow_lg()
             .child(
                 div()
+                    .flex_shrink_0()
                     .px_3()
                     .py_2()
                     .border_b_1()
@@ -500,9 +501,9 @@ impl Workspace {
                             .child(title),
                     ),
             )
-            .child(PaletteInput {
+            .child(div().flex_shrink_0().child(PaletteInput {
                 workspace: cx.entity(),
-            })
+            }))
             .on_action(
                 cx.listener(|this, _: &PaletteConfirm, window, cx| {
                     this.palette_confirm(window, cx)
@@ -556,90 +557,96 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &Copy, _, cx| this.palette_copy(cx)))
             .on_action(cx.listener(|this, _: &Cut, _, cx| this.palette_cut(cx)))
             .on_action(cx.listener(|this, _: &Paste, _, cx| this.palette_paste(cx)))
-            .children(match &state.results {
-                PaletteResults::Notes(ids) => ids
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, id)| {
-                        let is_selected = ix == state.selected;
-                        let rel_path = id.as_str().to_string();
-                        let title = self
-                            .graph
-                            .meta(id)
-                            .map(|meta| meta.title.clone())
-                            .unwrap_or_else(|| id.file_stem().to_string());
-                        let open_path = rel_path.clone();
-                        div()
-                            .id(gpui::SharedString::from(format!("palette-row:{rel_path}")))
-                            .px_3()
-                            .py_1()
-                            .cursor_pointer()
-                            .bg(if is_selected {
-                                self.palette.hover
-                            } else {
-                                self.palette.background
-                            })
-                            .on_click(cx.listener(move |this, _event, window, cx| {
-                                this.palette_state = None;
-                                this.focus_handle.focus(window);
-                                this.open_note(&open_path, cx);
-                                cx.notify();
-                            }))
-                            .child(div().text_size(px(13.)).child(title))
-                            .child(
+            .child(
+                div()
+                    .id("palette-results")
+                    .max_h(px(280.))
+                    .overflow_y_scroll()
+                    .children(match &state.results {
+                        PaletteResults::Notes(ids) => ids
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, id)| {
+                                let is_selected = ix == state.selected;
+                                let rel_path = id.as_str().to_string();
+                                let title = self
+                                    .graph
+                                    .meta(id)
+                                    .map(|meta| meta.title.clone())
+                                    .unwrap_or_else(|| id.file_stem().to_string());
+                                let open_path = rel_path.clone();
                                 div()
-                                    .text_size(px(10.))
-                                    .text_color(self.palette.text_muted)
-                                    .child(rel_path),
-                            )
-                            .into_any_element()
-                    })
-                    .collect::<Vec<_>>(),
-                PaletteResults::Hits(hits) => hits
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, hit)| {
-                        let is_selected = ix == state.selected;
-                        let rel_path = hit.id.as_str().to_string();
-                        let title = self
-                            .graph
-                            .meta(&hit.id)
-                            .map(|meta| meta.title.clone())
-                            .unwrap_or_else(|| hit.id.file_stem().to_string());
-                        let open_path = rel_path.clone();
-                        let line = hit.snippets.first().map(|s| s.line).unwrap_or(0);
-                        div()
-                            .id(gpui::SharedString::from(format!("palette-hit:{rel_path}")))
-                            .px_3()
-                            .py_1()
-                            .cursor_pointer()
-                            .bg(if is_selected {
-                                self.palette.hover
-                            } else {
-                                self.palette.background
+                                    .id(gpui::SharedString::from(format!("palette-row:{rel_path}")))
+                                    .px_3()
+                                    .py_1()
+                                    .cursor_pointer()
+                                    .bg(if is_selected {
+                                        self.palette.hover
+                                    } else {
+                                        self.palette.background
+                                    })
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        this.palette_state = None;
+                                        this.focus_handle.focus(window);
+                                        this.open_note(&open_path, cx);
+                                        cx.notify();
+                                    }))
+                                    .child(div().text_size(px(13.)).child(title))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(self.palette.text_muted)
+                                            .child(rel_path),
+                                    )
+                                    .into_any_element()
                             })
-                            .on_click(cx.listener(move |this, _event, window, cx| {
-                                this.palette_state = None;
-                                this.focus_handle.focus(window);
-                                this.open_note_at_line(&open_path, line, cx);
-                                cx.notify();
-                            }))
-                            .child(div().text_size(px(13.)).child(title))
-                            .child(
+                            .collect::<Vec<_>>(),
+                        PaletteResults::Hits(hits) => hits
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, hit)| {
+                                let is_selected = ix == state.selected;
+                                let rel_path = hit.id.as_str().to_string();
+                                let title = self
+                                    .graph
+                                    .meta(&hit.id)
+                                    .map(|meta| meta.title.clone())
+                                    .unwrap_or_else(|| hit.id.file_stem().to_string());
+                                let open_path = rel_path.clone();
+                                let line = hit.snippets.first().map(|s| s.line).unwrap_or(0);
                                 div()
-                                    .text_size(px(10.))
-                                    .text_color(self.palette.text_muted)
-                                    .child(rel_path),
-                            )
-                            .children(
-                                hit.snippets
-                                    .iter()
-                                    .map(|snippet| self.render_snippet(snippet)),
-                            )
-                            .into_any_element()
-                    })
-                    .collect::<Vec<_>>(),
-            })
+                                    .id(gpui::SharedString::from(format!("palette-hit:{rel_path}")))
+                                    .px_3()
+                                    .py_1()
+                                    .cursor_pointer()
+                                    .bg(if is_selected {
+                                        self.palette.hover
+                                    } else {
+                                        self.palette.background
+                                    })
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        this.palette_state = None;
+                                        this.focus_handle.focus(window);
+                                        this.open_note_at_line(&open_path, line, cx);
+                                        cx.notify();
+                                    }))
+                                    .child(div().text_size(px(13.)).child(title))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(self.palette.text_muted)
+                                            .child(rel_path),
+                                    )
+                                    .children(
+                                        hit.snippets
+                                            .iter()
+                                            .map(|snippet| self.render_snippet(snippet)),
+                                    )
+                                    .into_any_element()
+                            })
+                            .collect::<Vec<_>>(),
+                    }),
+            )
             .children(self.palette_hint(state));
 
         Some(
