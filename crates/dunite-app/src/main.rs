@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use dunite_settings::Settings;
 use dunite_ui::Workspace;
-use dunite_ui::{global_key_bindings, key_bindings};
+use dunite_ui::{global_key_bindings, key_bindings, palette_key_bindings};
 use dunite_vault::Vault;
 use gpui::{
     App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
@@ -49,6 +49,7 @@ fn main() {
     Application::new().run(move |cx: &mut App| {
         cx.bind_keys(global_key_bindings());
         cx.bind_keys(key_bindings());
+        cx.bind_keys(palette_key_bindings());
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -71,8 +72,9 @@ fn main() {
             |window, cx| {
                 cx.new(|cx| {
                     let focus_handle = cx.focus_handle();
+                    let palette_focus = cx.focus_handle();
                     focus_handle.focus(window);
-                    Workspace::new(vault, settings, focus_handle)
+                    Workspace::new(vault, settings, focus_handle, palette_focus)
                 })
             },
         )

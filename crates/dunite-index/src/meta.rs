@@ -29,6 +29,8 @@ pub struct NoteHeading {
 pub struct ResolvedLink {
     /// Текст цели: `[[target|display]]` → `target`.
     pub target_text: String,
+    /// Char-диапазон текста цели — для перезаписи при переименовании.
+    pub target_range: Range<usize>,
     pub display: Option<String>,
     /// Char-диапазон ссылки в исходнике.
     pub range: Range<usize>,

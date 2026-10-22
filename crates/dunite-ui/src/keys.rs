@@ -58,11 +58,32 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 
 /// Привязки вне контекста редактора (управление вкладками, выход).
 pub fn global_key_bindings() -> Vec<KeyBinding> {
-    use crate::actions::{CloseTab, NextTab, PrevTab, Quit};
+    use crate::actions::{
+        CloseTab, NavBack, NavForward, NextTab, OpenSwitcher, PrevTab, Quit, RenameNote,
+    };
     vec![
         KeyBinding::new("ctrl-w", CloseTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
         KeyBinding::new("ctrl-shift-tab", PrevTab, None),
         KeyBinding::new("ctrl-q", Quit, None),
+        // палитра и навигация (SPEC §9.4, §8.3)
+        KeyBinding::new("ctrl-p", OpenSwitcher, None),
+        KeyBinding::new("f2", RenameNote, None),
+        KeyBinding::new("alt-left", NavBack, None),
+        KeyBinding::new("alt-right", NavForward, None),
+    ]
+}
+
+/// Привязки открытой палитры (контекст `palette`).
+pub fn palette_key_bindings() -> Vec<KeyBinding> {
+    use crate::actions::{
+        PaletteBackspace, PaletteCancel, PaletteConfirm, PaletteNext, PalettePrev,
+    };
+    vec![
+        KeyBinding::new("enter", PaletteConfirm, Some("palette")),
+        KeyBinding::new("escape", PaletteCancel, Some("palette")),
+        KeyBinding::new("down", PaletteNext, Some("palette")),
+        KeyBinding::new("up", PalettePrev, Some("palette")),
+        KeyBinding::new("backspace", PaletteBackspace, Some("palette")),
     ]
 }

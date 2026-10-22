@@ -662,6 +662,14 @@ impl EntityInputHandler for Workspace {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
+        // палитра: курсор в конце запроса
+        if let Some(state) = self.palette_state.as_ref() {
+            let len: usize = state.query.chars().map(char::len_utf16).sum();
+            return Some(UTF16Selection {
+                range: len..len,
+                reversed: false,
+            });
+        }
         let tab = self.tabs.get(self.active_tab)?;
         let text = tab.editor.text();
         let selection = tab.editor.selection();
@@ -690,6 +698,11 @@ impl EntityInputHandler for Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // открытая палитра забирает весь текстовый ввод (SPEC §9.4)
+        if self.palette_state.is_some() {
+            self.palette_insert(new_text, cx);
+            return;
+        }
         if let Some(range_utf16) = range_utf16 {
             let range = {
                 let Some(tab) = self.tabs.get(self.active_tab) else {

@@ -48,3 +48,27 @@ actions!(
         Paste,
     ]
 );
+
+actions!(
+    dunite,
+    [
+        // палитра: quick switcher и переименование (SPEC §9.4)
+        OpenSwitcher,
+        RenameNote,
+        // навигация back/forward (SPEC §8.3)
+        NavBack,
+        NavForward,
+    ]
+);
+
+actions!(
+    dunite,
+    [
+        // действия открытой палитры (контекст `palette`)
+        PaletteConfirm,
+        PaletteCancel,
+        PaletteNext,
+        PalettePrev,
+        PaletteBackspace,
+    ]
+);

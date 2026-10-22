@@ -13,11 +13,14 @@ use dunite_settings::Settings;
 use dunite_vault::{NoteId, Vault};
 use gpui::{Context, FocusHandle, FontWeight, Render, RenderImage, Window, div, prelude::*, px};
 
-use crate::actions::{CloseTab, NextTab, PrevTab, Quit};
+use crate::actions::{
+    CloseTab, NavBack, NavForward, NextTab, OpenSwitcher, PrevTab, Quit, RenameNote,
+};
 use crate::decor;
 use crate::editor_element::PaintState;
 use crate::editor_pane::ClickTracker;
 use crate::images;
+use crate::palette::PaletteState;
 use crate::theme::Palette;
 
 /// Состояние загрузки изображения (SPEC §7.5).
@@ -68,6 +71,14 @@ pub struct Workspace {
     pub(crate) expanded: HashSet<String>,
     /// Развернутые теги в панели тегов.
     pub(crate) expanded_tags: HashSet<String>,
+    /// Открытая палитра (quick switcher / переименование).
+    pub(crate) palette_state: Option<PaletteState>,
+    /// Фокус палитры — отдельный, чтобы её контекст клавиш не спорил
+    /// с контекстом редактора.
+    pub(crate) palette_focus: FocusHandle,
+    /// История навигации назад/вперёд (SPEC §8.3): (заметка, смещение).
+    pub(crate) nav_back: Vec<(NoteId, usize)>,
+    pub(crate) nav_forward: Vec<(NoteId, usize)>,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active_tab: usize,
     pub(crate) status_message: String,
@@ -89,7 +100,12 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(vault: Vault, settings: Settings, focus_handle: FocusHandle) -> Self {
+    pub fn new(
+        vault: Vault,
+        settings: Settings,
+        focus_handle: FocusHandle,
+        palette_focus: FocusHandle,
+    ) -> Self {
         let palette = Palette::for_theme(settings.theme);
         // полный разбор хранилища при открытии; для больших vault'ов
         // позже уедет в фон (сейчас это миллисекунды)
@@ -111,12 +127,32 @@ impl Workspace {
             selecting: false,
             click: ClickTracker::default(),
             focus_handle,
+            palette_state: None,
+            palette_focus,
+            nav_back: Vec::new(),
+            nav_forward: Vec::new(),
             save_generation: 0,
         }
     }
 
     /// Открывает заметку во вкладке (или фокусирует уже открытую).
     pub(crate) fn open_note(&mut self, rel_path: &str, cx: &mut Context<Self>) {
+        self.open_note_impl(rel_path, cx, true);
+    }
+
+    fn open_note_impl(&mut self, rel_path: &str, cx: &mut Context<Self>, record_history: bool) {
+        if record_history {
+            let current = self
+                .tabs
+                .get(self.active_tab)
+                .map(|tab| (tab.note_id.clone(), tab.editor.selection().head));
+            if let Some((current_id, offset)) = current {
+                if current_id.as_str() != rel_path {
+                    self.nav_back.push((current_id, offset));
+                    self.nav_forward.clear();
+                }
+            }
+        }
         if let Some(ix) = self
             .tabs
             .iter()
@@ -142,6 +178,32 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// Назад по истории переходов (Alt+Left).
+    pub(crate) fn navigate_back(&mut self, cx: &mut Context<Self>) {
+        let Some((id, offset)) = self.nav_back.pop() else {
+            return;
+        };
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            self.nav_forward
+                .push((tab.note_id.clone(), tab.editor.selection().head));
+        }
+        self.open_note_impl(id.as_str(), cx, false);
+        self.goto_offset(offset, cx);
+    }
+
+    /// Вперёд по истории переходов (Alt+Right).
+    pub(crate) fn navigate_forward(&mut self, cx: &mut Context<Self>) {
+        let Some((id, offset)) = self.nav_forward.pop() else {
+            return;
+        };
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            self.nav_back
+                .push((tab.note_id.clone(), tab.editor.selection().head));
+        }
+        self.open_note_impl(id.as_str(), cx, false);
+        self.goto_offset(offset, cx);
     }
 
     pub(crate) fn activate_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -398,6 +460,12 @@ impl Render for Workspace {
                 this.save_all();
                 window.remove_window();
             }))
+            .on_action(
+                cx.listener(|this, _: &OpenSwitcher, window, cx| this.open_switcher(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &RenameNote, window, cx| this.open_rename(window, cx)))
+            .on_action(cx.listener(|this, _: &NavBack, _, cx| this.navigate_back(cx)))
+            .on_action(cx.listener(|this, _: &NavForward, _, cx| this.navigate_forward(cx)))
             .size_full()
             .flex()
             .flex_col()
@@ -414,5 +482,6 @@ impl Render for Workspace {
                     .child(self.render_right_sidebar(cx)),
             )
             .child(self.render_status_bar())
+            .children(self.render_palette(cx))
     }
 }

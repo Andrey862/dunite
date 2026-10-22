@@ -16,6 +16,8 @@ pub struct BacklinkRef {
     pub source: NoteId,
     /// Char-диапазон ссылки в исходнике.
     pub range: std::ops::Range<usize>,
+    /// Char-диапазон текста цели — для перезаписи при переименовании.
+    pub target_range: std::ops::Range<usize>,
     /// Строка со ссылкой — фрагмент контекста для панели.
     pub context: String,
     /// Строка ссылки в исходнике (для клика и навигации).
@@ -159,6 +161,79 @@ impl LinkGraph {
         self.metas.iter()
     }
 
+    /// Переименовывает заметку и переписывает все ссылающиеся ссылки
+    /// (SPEC §7.2: «пересохранение ссылок при переименовании обязательно»).
+    ///
+    /// Заменяется только текст цели ссылки (`[[старое|надпись]]` →
+    /// `[[новое|надпись]]`). Возвращает число обновлённых ссылок.
+    pub fn rename_note(
+        &mut self,
+        vault: &Vault,
+        from: &NoteId,
+        to: &NoteId,
+    ) -> std::io::Result<usize> {
+        use std::io;
+
+        let from_path = vault.absolute(from.as_str());
+        let to_path = vault.absolute(to.as_str());
+        if !from_path.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("нет файла {}", from.as_str()),
+            ));
+        }
+        if to_path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("файл {} уже существует", to.as_str()),
+            ));
+        }
+
+        // 1. переписать ссылающиеся заметки
+        let mut by_source: HashMap<NoteId, Vec<BacklinkRef>> = HashMap::new();
+        for ref_ in self.backlinks(from) {
+            by_source
+                .entry(ref_.source.clone())
+                .or_default()
+                .push(ref_.clone());
+        }
+        let new_target: String = to.as_str().trim_end_matches(".md").to_string();
+        let mut updated = 0usize;
+        let mut rewritten: Vec<NoteId> = Vec::new();
+        for (source, mut refs) in by_source {
+            let Ok(text) = vault.read_note(source.as_str()) else {
+                continue;
+            };
+            let mut chars: Vec<char> = text.chars().collect();
+            // с конца — чтобы смещения остались валидными
+            refs.sort_by_key(|ref_| ref_.target_range.start);
+            for ref_ in refs.iter().rev() {
+                if ref_.target_range.end > chars.len() {
+                    continue;
+                }
+                chars.splice(ref_.target_range.clone(), new_target.chars());
+                updated += 1;
+            }
+            let new_text: String = chars.into_iter().collect();
+            std::fs::write(vault.absolute(source.as_str()), new_text)?;
+            rewritten.push(source);
+        }
+
+        // 2. переименовать сам файл
+        if let Some(parent) = to_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&from_path, &to_path)?;
+
+        // 3. обновить граф: перечитать переписанные заметки и цель
+        self.remove_note(from);
+        for source in &rewritten {
+            self.update_note(vault, source);
+        }
+        self.update_note(vault, to);
+        Ok(updated)
+    }
+
     // ── внутреннее ────────────────────────────────────────────────────────
 
     fn index_name(&mut self, id: &NoteId, name: &str) {
@@ -199,6 +274,7 @@ impl LinkGraph {
                     self.backlinks.entry(target).or_default().push(BacklinkRef {
                         source: source.clone(),
                         range: link.range,
+                        target_range: link.target_range,
                         context: link.context,
                         line: link.line,
                     });
@@ -359,5 +435,49 @@ mod tests {
             graph.resolve(&NoteId::new("Главная.md"), "Вечер"),
             Some(new_id.clone())
         );
+    }
+
+    #[test]
+    fn rename_note_rewrites_backlinks_preserving_display() {
+        let (_dir, mut graph, mut vault) = graph();
+        fs::write(
+            vault.absolute("projects/Бета.md"),
+            "См. [[Alpha]] и [[Alpha|с надписью]]\n",
+        )
+        .unwrap();
+        vault.rescan().unwrap();
+        graph.update_note(&vault, &NoteId::new("projects/Бета.md"));
+
+        let from = NoteId::new("projects/Alpha.md");
+        let to = NoteId::new("projects/Гамма.md");
+        let updated = graph.rename_note(&vault, &from, &to).unwrap();
+        assert!(updated >= 2, "переписано ссылок: {updated}");
+
+        let text = vault.read_note("projects/Бета.md").unwrap();
+        assert!(text.contains("[[projects/Гамма]]"), "{text}");
+        assert!(text.contains("[[projects/Гамма|с надписью]]"), "{text}");
+        assert!(!text.contains("Alpha"), "{text}");
+
+        assert_eq!(
+            graph.resolve(&NoteId::new("projects/Бета.md"), "projects/Гамма"),
+            Some(to.clone())
+        );
+        assert!(
+            graph
+                .backlinks(&to)
+                .iter()
+                .any(|r| r.source.as_str() == "projects/Бета.md")
+        );
+    }
+
+    #[test]
+    fn rename_refuses_existing_target() {
+        let (_dir, mut graph, vault) = graph();
+        let err = graph.rename_note(
+            &vault,
+            &NoteId::new("projects/Бета.md"),
+            &NoteId::new("Главная.md"),
+        );
+        assert!(err.is_err());
     }
 }

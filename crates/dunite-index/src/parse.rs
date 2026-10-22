@@ -52,6 +52,7 @@ pub fn parse_note(vault: &Vault, id: &NoteId) -> NoteMeta {
                     embed,
                 } => links.push(ResolvedLink {
                     target_text: collect_chars(&chars, target),
+                    target_range: target.clone(),
                     display: display.as_ref().map(|range| collect_chars(&chars, range)),
                     range: range.clone(),
                     line: line_of(&chars, range.start),
@@ -69,6 +70,7 @@ pub fn parse_note(vault: &Vault, id: &NoteId) -> NoteMeta {
                     image,
                 } => links.push(ResolvedLink {
                     target_text: collect_chars(&chars, target),
+                    target_range: target.clone(),
                     display: display.as_ref().map(|range| collect_chars(&chars, range)),
                     range: range.clone(),
                     line: line_of(&chars, range.start),
