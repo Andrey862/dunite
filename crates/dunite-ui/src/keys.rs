@@ -59,7 +59,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 /// Привязки вне контекста редактора (управление вкладками, выход).
 pub fn global_key_bindings() -> Vec<KeyBinding> {
     use crate::actions::{
-        CloseTab, NavBack, NavForward, NextTab, OpenSearch, OpenSwitcher, PrevTab, Quit, RenameNote,
+        CloseTab, NavBack, NavForward, NextTab, OpenSearch, OpenSwitcher, PrevTab, Quit,
+        ReloadNote, RenameNote, SaveNote,
     };
     vec![
         KeyBinding::new("ctrl-w", CloseTab, None),
@@ -72,13 +73,18 @@ pub fn global_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("f2", RenameNote, None),
         KeyBinding::new("alt-left", NavBack, None),
         KeyBinding::new("alt-right", NavForward, None),
+        // внешние правки (SPEC §14)
+        KeyBinding::new("ctrl-s", SaveNote, None),
+        KeyBinding::new("f5", ReloadNote, None),
     ]
 }
 
 /// Привязки открытой палитры (контекст `palette`).
 pub fn palette_key_bindings() -> Vec<KeyBinding> {
     use crate::actions::{
-        PaletteBackspace, PaletteCancel, PaletteConfirm, PaletteNext, PalettePrev,
+        Copy, CursorLeft, CursorLineEnd, CursorLineStart, CursorRight, Cut, DeleteForward,
+        PaletteBackspace, PaletteCancel, PaletteConfirm, PaletteNext, PalettePrev, Paste,
+        SelectAll, SelectLeft, SelectLineEnd, SelectLineStart, SelectRight,
     };
     vec![
         KeyBinding::new("enter", PaletteConfirm, Some("palette")),
@@ -86,5 +92,19 @@ pub fn palette_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", PaletteNext, Some("palette")),
         KeyBinding::new("up", PalettePrev, Some("palette")),
         KeyBinding::new("backspace", PaletteBackspace, Some("palette")),
+        // редактирование запроса
+        KeyBinding::new("left", CursorLeft, Some("palette")),
+        KeyBinding::new("right", CursorRight, Some("palette")),
+        KeyBinding::new("shift-left", SelectLeft, Some("palette")),
+        KeyBinding::new("shift-right", SelectRight, Some("palette")),
+        KeyBinding::new("home", CursorLineStart, Some("palette")),
+        KeyBinding::new("end", CursorLineEnd, Some("palette")),
+        KeyBinding::new("shift-home", SelectLineStart, Some("palette")),
+        KeyBinding::new("shift-end", SelectLineEnd, Some("palette")),
+        KeyBinding::new("delete", DeleteForward, Some("palette")),
+        KeyBinding::new("ctrl-a", SelectAll, Some("palette")),
+        KeyBinding::new("ctrl-c", Copy, Some("palette")),
+        KeyBinding::new("ctrl-x", Cut, Some("palette")),
+        KeyBinding::new("ctrl-v", Paste, Some("palette")),
     ]
 }

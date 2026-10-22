@@ -44,31 +44,31 @@ impl SearchQuery {
 pub fn parse_query(input: &str) -> SearchQuery {
     let mut query = SearchQuery::default();
     for token in tokenize_query(input) {
-        let (prefix, rest) = match token.split_once(':') {
-            Some((prefix, rest))
-                if matches!(prefix, "tag" | "path" | "link") && !rest.is_empty() =>
-            {
-                (Some(prefix), rest.to_string())
-            }
-            _ => (None, token.clone()),
-        };
-        let value = rest.trim_matches('"').to_lowercase();
-        match prefix {
-            Some("tag") => query.tags.push(value),
-            Some("path") => query.paths.push(value),
-            Some("link") => query.links.push(
-                value
-                    .trim_start_matches("[[")
-                    .trim_end_matches("]]")
-                    .to_string(),
-            ),
-            _ => {
-                if token.starts_with('"') && token.ends_with('"') && token.len() >= 2 {
-                    query.phrases.push(value);
-                } else {
-                    query.terms.push(value);
+        if let Some((prefix, rest)) = token.split_once(':') {
+            if matches!(prefix, "tag" | "path" | "link") && !rest.is_empty() {
+                let value = rest.trim_matches('"').to_lowercase();
+                match prefix {
+                    "tag" => query.tags.push(value),
+                    "path" => query.paths.push(value),
+                    _ => query.links.push(
+                        value
+                            .trim_start_matches("[[")
+                            .trim_end_matches("]]")
+                            .to_string(),
+                    ),
                 }
+                continue;
             }
+        }
+        if token.starts_with('"') && token.ends_with('"') && token.len() >= 2 {
+            // пустая фраза («""») не добавляется — иначе пустая
+            // «игла» зависает в построении сниппетов
+            let phrase = token.trim_matches('"').to_lowercase();
+            if !phrase.is_empty() {
+                query.phrases.push(phrase);
+            }
+        } else if !token.is_empty() {
+            query.terms.push(token.to_lowercase());
         }
     }
     query
@@ -138,6 +138,10 @@ pub fn build_snippets(body: &str, needles: &[String]) -> Vec<Snippet> {
         let lower = line.to_lowercase();
         let mut ranges = Vec::new();
         for needle in needles {
+            if needle.is_empty() {
+                // защита от зависания: find("") всегда совпадает
+                continue;
+            }
             let mut from = 0;
             while let Some(found) = lower[from..].find(needle.as_str()) {
                 let start = from + found;
@@ -208,6 +212,18 @@ mod tests {
             tokenize("Hello, Привет-Мир 42!"),
             vec!["hello", "привет", "мир", "42"]
         );
+    }
+
+    #[test]
+    fn empty_query_pieces_are_ignored() {
+        // регрессия: «""» порождало пустую фразу и зависание в сниппетах
+        let query = parse_query("\"\" \"");
+        assert!(query.phrases.is_empty());
+        assert_eq!(query.terms, vec!["\"".to_string()]);
+
+        // пустая игла не зацикливает построение сниппетов
+        let snippets = build_snippets("любой текст", &["".to_string(), "текст".to_string()]);
+        assert_eq!(snippets.len(), 1);
     }
 
     #[test]

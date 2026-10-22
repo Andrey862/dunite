@@ -299,6 +299,9 @@ impl LinkGraph {
     /// Заметки с термином: подстрочное совпадение токенов (как в Obsidian —
     /// «ежик» находит «ежиком»). Возвращает суммарную частоту по заметке.
     fn docs_for_term(&self, term: &str) -> HashMap<NoteId, u32> {
+        if term.is_empty() {
+            return HashMap::new();
+        }
         let mut totals: HashMap<NoteId, u32> = HashMap::new();
         for (token, entries) in &self.postings {
             if !token.contains(term) {

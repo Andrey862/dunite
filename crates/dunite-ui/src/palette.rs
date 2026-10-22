@@ -12,7 +12,11 @@ use gpui::{
     point, prelude::*, px, relative, size,
 };
 
-use crate::actions::{PaletteBackspace, PaletteCancel, PaletteConfirm, PaletteNext, PalettePrev};
+use crate::actions::{
+    Copy, CursorLeft, CursorLineEnd, CursorLineStart, CursorRight, Cut, DeleteForward,
+    PaletteBackspace, PaletteCancel, PaletteConfirm, PaletteNext, PalettePrev, Paste, SelectAll,
+    SelectLeft, SelectLineEnd, SelectLineStart, SelectRight,
+};
 use crate::workspace::Workspace;
 
 /// Режим палитры.
@@ -50,32 +54,116 @@ impl PaletteResults {
 pub struct PaletteState {
     pub mode: PaletteMode,
     pub query: String,
+    /// Каретка в символах.
+    pub cursor: usize,
+    /// Якорь выделения (равен курсору, когда выделения нет).
+    pub anchor: usize,
     pub selected: usize,
     pub results: PaletteResults,
+}
+
+impl PaletteState {
+    /// Новое состояние с кареткой в конце запроса.
+    pub fn new(mode: PaletteMode, query: String, results: PaletteResults) -> Self {
+        let end = query.chars().count();
+        Self {
+            mode,
+            query,
+            cursor: end,
+            anchor: end,
+            selected: 0,
+            results,
+        }
+    }
+
+    /// Выделение (min..max, в символах).
+    pub fn selection(&self) -> std::ops::Range<usize> {
+        self.anchor.min(self.cursor)..self.anchor.max(self.cursor)
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.anchor != self.cursor
+    }
+
+    pub fn selected_text(&self) -> String {
+        let range = self.selection();
+        self.query
+            .chars()
+            .skip(range.start)
+            .take(range.end - range.start)
+            .collect()
+    }
+
+    /// Вставка текста: заменяет выделение, каретка — за вставленным.
+    pub fn insert_text(&mut self, text: &str) {
+        let range = self.selection();
+        self.replace_range(range, text);
+    }
+
+    /// Backspace: выделение или символ слева.
+    pub fn backspace(&mut self) {
+        if self.has_selection() {
+            let range = self.selection();
+            self.replace_range(range, "");
+        } else if self.cursor > 0 {
+            self.replace_range(self.cursor - 1..self.cursor, "");
+        }
+    }
+
+    /// Delete: выделение или символ справа.
+    pub fn delete_forward(&mut self) {
+        let len = self.query.chars().count();
+        if self.has_selection() {
+            let range = self.selection();
+            self.replace_range(range, "");
+        } else if self.cursor < len {
+            self.replace_range(self.cursor..self.cursor + 1, "");
+        }
+    }
+
+    /// Движение каретки; `extend` расширяет выделение.
+    pub fn move_cursor(&mut self, offset: usize, extend: bool) {
+        let len = self.query.chars().count();
+        self.cursor = offset.min(len);
+        if !extend {
+            self.anchor = self.cursor;
+        }
+    }
+
+    pub fn select_all(&mut self) {
+        self.anchor = 0;
+        self.cursor = self.query.chars().count();
+    }
+
+    fn replace_range(&mut self, range: std::ops::Range<usize>, text: &str) {
+        let mut chars: Vec<char> = self.query.chars().collect();
+        chars.splice(range.clone(), text.chars());
+        self.query = chars.into_iter().collect();
+        self.cursor = range.start + text.chars().count();
+        self.anchor = self.cursor;
+    }
 }
 
 impl Workspace {
     /// Открывает quick switcher (Ctrl+P).
     pub(crate) fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let matches = self.switcher_matches("");
-        self.palette_state = Some(PaletteState {
-            mode: PaletteMode::QuickSwitcher,
-            query: String::new(),
-            selected: 0,
-            results: PaletteResults::Notes(matches),
-        });
+        self.palette_state = Some(PaletteState::new(
+            PaletteMode::QuickSwitcher,
+            String::new(),
+            PaletteResults::Notes(matches),
+        ));
         self.palette_focus.focus(window);
         cx.notify();
     }
 
     /// Открывает полнотекстовый поиск (Ctrl+Shift+F, SPEC §11).
     pub(crate) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette_state = Some(PaletteState {
-            mode: PaletteMode::Search,
-            query: String::new(),
-            selected: 0,
-            results: PaletteResults::Hits(Vec::new()),
-        });
+        self.palette_state = Some(PaletteState::new(
+            PaletteMode::Search,
+            String::new(),
+            PaletteResults::Hits(Vec::new()),
+        ));
         self.palette_focus.focus(window);
         cx.notify();
     }
@@ -87,12 +175,11 @@ impl Workspace {
         };
         let note = tab.note_id.clone();
         let query = note.file_stem().to_string();
-        self.palette_state = Some(PaletteState {
-            mode: PaletteMode::Rename { note },
+        self.palette_state = Some(PaletteState::new(
+            PaletteMode::Rename { note },
             query,
-            selected: 0,
-            results: PaletteResults::Notes(Vec::new()),
-        });
+            PaletteResults::Notes(Vec::new()),
+        ));
         self.palette_focus.focus(window);
         cx.notify();
     }
@@ -109,7 +196,7 @@ impl Workspace {
         let Some(state) = self.palette_state.as_mut() else {
             return;
         };
-        state.query.push_str(text);
+        state.insert_text(text);
         self.refresh_palette_results();
         cx.notify();
     }
@@ -118,9 +205,83 @@ impl Workspace {
         let Some(state) = self.palette_state.as_mut() else {
             return;
         };
-        state.query.pop();
+        state.backspace();
         self.refresh_palette_results();
         cx.notify();
+    }
+
+    pub(crate) fn palette_delete_forward(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.palette_state.as_mut() else {
+            return;
+        };
+        state.delete_forward();
+        self.refresh_palette_results();
+        cx.notify();
+    }
+
+    /// Движение каретки в запросе палитры.
+    pub(crate) fn palette_cursor(&mut self, offset: usize, extend: bool, cx: &mut Context<Self>) {
+        let Some(state) = self.palette_state.as_mut() else {
+            return;
+        };
+        state.move_cursor(offset, extend);
+        cx.notify();
+    }
+
+    pub(crate) fn palette_cursor_left(&mut self, extend: bool, cx: &mut Context<Self>) {
+        let offset = self
+            .palette_state
+            .as_ref()
+            .map(|state| state.cursor.saturating_sub(1))
+            .unwrap_or(0);
+        self.palette_cursor(offset, extend, cx);
+    }
+
+    pub(crate) fn palette_cursor_right(&mut self, extend: bool, cx: &mut Context<Self>) {
+        let offset = self
+            .palette_state
+            .as_ref()
+            .map(|state| state.cursor + 1)
+            .unwrap_or(0);
+        self.palette_cursor(offset, extend, cx);
+    }
+
+    pub(crate) fn palette_select_all(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.palette_state.as_mut() {
+            state.select_all();
+        }
+        cx.notify();
+    }
+
+    /// Копирование выделения запроса в буфер обмена.
+    pub(crate) fn palette_copy(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.palette_state.as_ref() else {
+            return;
+        };
+        let text = state.selected_text();
+        if !text.is_empty() {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
+    }
+
+    pub(crate) fn palette_cut(&mut self, cx: &mut Context<Self>) {
+        self.palette_copy(cx);
+        if let Some(state) = self.palette_state.as_mut() {
+            if state.has_selection() {
+                let range = state.selection();
+                state.insert_text("");
+                let _ = range;
+            }
+        }
+        self.refresh_palette_results();
+        cx.notify();
+    }
+
+    pub(crate) fn palette_paste(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        self.palette_insert(&text, cx);
     }
 
     /// Пересчёт результатов по текущему запросу (поиск — по мере ввода).
@@ -262,8 +423,9 @@ impl Workspace {
             if tab.editor.is_dirty() {
                 if let Ok(text) = self.vault.read_note(tab.note_id.as_str()) {
                     if text != tab.editor.text() {
+                        tab.conflict = true;
                         self.status_message = format!(
-                            "{} изменён снаружи и не совпадает с редактором",
+                            "{} изменён снаружи: автосейв остановлен; Ctrl+S — записать поверх, F5 — перечитать",
                             tab.note_id.as_str()
                         );
                     }
@@ -278,6 +440,7 @@ impl Workspace {
                 tab.editor = dunite_editor::Editor::from_text(text);
                 let max = tab.editor.buffer().len_chars();
                 tab.editor.set_cursor(cursor.min(max), false);
+                tracing::info!("watcher: вкладка перечитана: {}", tab.note_id.as_str());
             }
         }
     }
@@ -351,6 +514,48 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &PaletteNext, _, cx| this.palette_move(1, cx)))
             .on_action(cx.listener(|this, _: &PalettePrev, _, cx| this.palette_move(-1, cx)))
             .on_action(cx.listener(|this, _: &PaletteBackspace, _, cx| this.palette_backspace(cx)))
+            // редактирование запроса (контекст `palette`)
+            .on_action(
+                cx.listener(|this, _: &CursorLeft, _, cx| this.palette_cursor_left(false, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &CursorRight, _, cx| this.palette_cursor_right(false, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectLeft, _, cx| this.palette_cursor_left(true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectRight, _, cx| this.palette_cursor_right(true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &CursorLineStart, _, cx| this.palette_cursor(0, false, cx)),
+            )
+            .on_action(cx.listener(|this, _: &CursorLineEnd, _, cx| {
+                let end = this
+                    .palette_state
+                    .as_ref()
+                    .map(|state| state.query.chars().count())
+                    .unwrap_or(0);
+                this.palette_cursor(end, false, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &SelectLineStart, _, cx| this.palette_cursor(0, true, cx)),
+            )
+            .on_action(cx.listener(|this, _: &SelectLineEnd, _, cx| {
+                let end = this
+                    .palette_state
+                    .as_ref()
+                    .map(|state| state.query.chars().count())
+                    .unwrap_or(0);
+                this.palette_cursor(end, true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.palette_select_all(cx)))
+            .on_action(
+                cx.listener(|this, _: &DeleteForward, _, cx| this.palette_delete_forward(cx)),
+            )
+            .on_action(cx.listener(|this, _: &Copy, _, cx| this.palette_copy(cx)))
+            .on_action(cx.listener(|this, _: &Cut, _, cx| this.palette_cut(cx)))
+            .on_action(cx.listener(|this, _: &Paste, _, cx| this.palette_paste(cx)))
             .children(match &state.results {
                 PaletteResults::Notes(ids) => ids
                     .iter()
@@ -536,6 +741,7 @@ struct PaletteInput {
 struct PaletteInputPrepaint {
     line: Option<ShapedLine>,
     cursor: Option<gpui::PaintQuad>,
+    selection: Option<gpui::PaintQuad>,
 }
 
 impl IntoElement for PaletteInput {
@@ -582,13 +788,14 @@ impl Element for PaletteInput {
     ) -> Self::PrepaintState {
         let workspace = self.workspace.read(cx);
         let palette = workspace.palette;
-        let query = workspace
+        let (query, cursor_char, anchor_char) = workspace
             .palette_state
             .as_ref()
-            .map(|state| state.query.clone())
+            .map(|state| (state.query.clone(), state.cursor, state.anchor))
             .unwrap_or_default();
         let text_style = window.text_style();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let text_left = bounds.left() + px(12.);
 
         let run = TextRun {
             len: query.len(),
@@ -601,15 +808,36 @@ impl Element for PaletteInput {
         let line = (!query.is_empty()).then(|| {
             window
                 .text_system()
-                .shape_line(query.into(), font_size, &[run], None)
+                .shape_line(query.clone().into(), font_size, &[run], None)
         });
-        let cursor_x = line
-            .as_ref()
-            .map(|line| line.width)
-            .unwrap_or_else(|| px(0.));
+
+        // позиции каретки и выделения по byte-смещениям shaped-строки
+        let byte_at = |char_offset: usize| -> usize {
+            crate::editor_element::byte_of_col(&query, char_offset)
+        };
+        let x_at = |char_offset: usize| -> Pixels {
+            line.as_ref()
+                .map(|line| line.x_for_index(byte_at(char_offset)))
+                .unwrap_or(px(0.))
+        };
+
+        let selection = if anchor_char != cursor_char {
+            let from = x_at(anchor_char.min(cursor_char));
+            let to = x_at(anchor_char.max(cursor_char));
+            Some(fill(
+                Bounds::from_corners(
+                    point(text_left + from, bounds.top() + px(8.)),
+                    point(text_left + to, bounds.top() + px(30.)),
+                ),
+                palette.selection,
+            ))
+        } else {
+            None
+        };
+
         let cursor = fill(
             Bounds::new(
-                point(bounds.left() + px(12.) + cursor_x, bounds.top() + px(8.)),
+                point(text_left + x_at(cursor_char), bounds.top() + px(8.)),
                 size(px(2.), px(22.)),
             ),
             palette.cursor,
@@ -618,6 +846,7 @@ impl Element for PaletteInput {
         PaletteInputPrepaint {
             line,
             cursor: Some(cursor),
+            selection,
         }
     }
 
@@ -637,6 +866,9 @@ impl Element for PaletteInput {
             gpui::ElementInputHandler::new(bounds, self.workspace.clone()),
             cx,
         );
+        if let Some(selection) = prepaint.selection.take() {
+            window.paint_quad(selection);
+        }
         if let Some(line) = prepaint.line.take() {
             line.paint(
                 point(bounds.left() + px(12.), bounds.top() + px(8.)),
@@ -654,8 +886,82 @@ impl Element for PaletteInput {
     }
 }
 
-/// Хелпер для имён элементов палитры.
-#[allow(dead_code)]
-fn palette_row_id(rel_path: &str) -> SharedString {
-    SharedString::from(format!("palette-row:{rel_path}"))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(query: &str) -> PaletteState {
+        PaletteState::new(
+            PaletteMode::QuickSwitcher,
+            query.to_string(),
+            PaletteResults::Notes(Vec::new()),
+        )
+    }
+
+    #[test]
+    fn insert_replaces_selection_and_moves_cursor() {
+        let mut s = state("hello world");
+        s.select_all();
+        s.insert_text("привет");
+        assert_eq!(s.query, "привет");
+        assert_eq!(s.cursor, 6);
+        assert!(!s.has_selection());
+    }
+
+    #[test]
+    fn insert_in_middle() {
+        let mut s = state("аб");
+        s.move_cursor(1, false);
+        s.insert_text("Х");
+        assert_eq!(s.query, "аХб");
+        assert_eq!(s.cursor, 2);
+    }
+
+    #[test]
+    fn backspace_deletes_selection_or_char() {
+        let mut s = state("абв");
+        s.move_cursor(2, false);
+        s.move_cursor(0, true); // выделение "аб"
+        s.backspace();
+        assert_eq!(s.query, "в");
+
+        let mut s = state("абв");
+        s.backspace(); // каретка в конце — удалит "в"
+        assert_eq!(s.query, "аб");
+    }
+
+    #[test]
+    fn delete_forward_and_edges() {
+        let mut s = state("аб");
+        s.move_cursor(0, false);
+        s.delete_forward();
+        assert_eq!(s.query, "б");
+        s.delete_forward();
+        assert_eq!(s.query, "");
+        s.delete_forward(); // не падает на пустом
+        s.backspace(); // не падает в начале
+        assert_eq!(s.query, "");
+    }
+
+    #[test]
+    fn selection_extends_and_collapses() {
+        let mut s = state("abcdef");
+        s.move_cursor(2, false);
+        s.move_cursor(5, true);
+        assert_eq!(s.selected_text(), "cde");
+        s.move_cursor(1, true); // реверс выделения
+        assert_eq!(s.selection(), 1..2);
+        s.move_cursor(3, false);
+        assert!(!s.has_selection());
+    }
+
+    #[test]
+    fn cut_removes_selected_text() {
+        let mut s = state("длинный запрос");
+        s.select_all();
+        let text = s.selected_text();
+        assert_eq!(text, "длинный запрос");
+        s.insert_text(""); // cut = copy + delete
+        assert_eq!(s.query, "");
+    }
 }

@@ -59,6 +59,9 @@ actions!(
         // навигация back/forward (SPEC §8.3)
         NavBack,
         NavForward,
+        // конфликт внешних правок (SPEC §14)
+        SaveNote,
+        ReloadNote,
     ]
 );
 

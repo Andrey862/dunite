@@ -79,6 +79,11 @@ impl VaultWatcher {
 
     /// Разбирает событие notify в события хранилища.
     fn collect(&mut self, event: &notify::Event) {
+        // Access/открытие файла игнорируем: наши же чтения (разбор,
+        // автосейв) иначе порождали бы события по кругу
+        if matches!(event.kind, notify::EventKind::Access(_)) {
+            return;
+        }
         for path in &event.paths {
             let Some(rel) = self.relative_path(path) else {
                 continue;
@@ -165,6 +170,32 @@ mod tests {
         fs::write(dir.path().join(".скрытая.md"), "x").unwrap();
         std::thread::sleep(Duration::from_millis(500));
         assert!(watcher.drain().is_empty());
+    }
+
+    #[test]
+    fn reads_do_not_retrigger_events() {
+        // регрессия: чтение файла порождало событие Access, apply читал файл
+        // снова — события повторялись бесконечно
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("Заметка.md"), "текст\n").unwrap();
+        let mut watcher = VaultWatcher::new(dir.path()).unwrap();
+
+        fs::write(dir.path().join("Заметка.md"), "новый текст\n").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = watcher.drain();
+        std::thread::sleep(Duration::from_millis(400));
+        let first = watcher.drain();
+        assert!(!first.is_empty(), "{first:?}");
+
+        // читаем файл, как это делает граф при переиндексации
+        for _ in 0..5 {
+            let _ = fs::read_to_string(dir.path().join("Заметка.md")).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            watcher.drain().is_empty(),
+            "чтения не должны порождать события"
+        );
     }
 
     #[test]

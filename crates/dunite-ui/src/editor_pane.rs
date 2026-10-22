@@ -571,6 +571,10 @@ impl Workspace {
                         return None;
                     }
                     let tab = workspace.tabs.get(workspace.active_tab)?;
+                    // конфликт с внешними правками: не затираем их молча
+                    if tab.conflict {
+                        return None;
+                    }
                     let text = tab.editor.text();
                     let path = workspace.vault.absolute(tab.note_id.as_str());
                     Some((text, path))
@@ -621,8 +625,44 @@ impl Workspace {
         if std::fs::write(&tmp, &text).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
             if let Some(tab) = self.tabs.get_mut(ix) {
                 tab.editor.mark_saved();
+                tab.conflict = false;
             }
         }
+    }
+
+    /// Ctrl+S: записать свою версию поверх внешних изменений (SPEC §14).
+    pub(crate) fn force_save_active(&mut self, cx: &mut Context<Self>) {
+        let ix = self.active_tab;
+        if self.tabs.get(ix).is_some_and(|tab| tab.conflict) {
+            self.save_tab_now(ix);
+            self.status_message = "своя версия записана поверх внешних изменений".to_string();
+        } else {
+            self.save_tab_now(ix);
+            self.status_message = "сохранено".to_string();
+        }
+        cx.notify();
+    }
+
+    /// F5: перечитать заметку с диска, отбросив правки буфера (SPEC §14).
+    pub(crate) fn reload_active_tab(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let rel_path = tab.note_id.as_str().to_string();
+        match self.vault.read_note(&rel_path) {
+            Ok(text) => {
+                let cursor = tab.editor.selection().head;
+                tab.editor = dunite_editor::Editor::from_text(text);
+                let max = tab.editor.buffer().len_chars();
+                tab.editor.set_cursor(cursor.min(max), false);
+                tab.conflict = false;
+                self.status_message = format!("{rel_path}: перечитано с диска");
+            }
+            Err(err) => {
+                self.status_message = format!("не удалось перечитать {rel_path}: {err}");
+            }
+        }
+        cx.notify();
     }
 
     /// Сохранить все открытые вкладки.

@@ -15,7 +15,8 @@ use dunite_vault::{NoteId, Vault};
 use gpui::{Context, FocusHandle, FontWeight, Render, RenderImage, Window, div, prelude::*, px};
 
 use crate::actions::{
-    CloseTab, NavBack, NavForward, NextTab, OpenSearch, OpenSwitcher, PrevTab, Quit, RenameNote,
+    CloseTab, NavBack, NavForward, NextTab, OpenSearch, OpenSwitcher, PrevTab, Quit, ReloadNote,
+    RenameNote, SaveNote,
 };
 use crate::decor;
 use crate::editor_element::PaintState;
@@ -59,6 +60,9 @@ pub struct EditorLayout {
 pub struct Tab {
     pub note_id: NoteId,
     pub editor: Editor,
+    /// Файл изменён снаружи, а в буфере есть несохранённые правки:
+    /// автосейв приостановлен до явного выбора (SPEC §14).
+    pub conflict: bool,
 }
 
 /// Рабочая область dunite.
@@ -144,6 +148,7 @@ impl Workspace {
         match VaultWatcher::new(self.vault.root()) {
             Ok(watcher) => {
                 self.watcher = Some(watcher);
+                tracing::info!("watcher запущен: {}", self.vault.root().display());
                 cx.spawn(async move |this, cx| {
                     loop {
                         cx.background_executor()
@@ -159,6 +164,7 @@ impl Workspace {
                             })
                             .unwrap_or_default();
                         if !batch.is_empty() {
+                            tracing::info!("watcher: пачка из {} событий", batch.len());
                             this.update(cx, |workspace, cx| {
                                 workspace.apply_vault_events(batch, cx)
                             })
@@ -170,6 +176,7 @@ impl Workspace {
             }
             Err(err) => {
                 self.status_message = format!("watcher недоступен: {err}");
+                tracing::error!("watcher не запустился: {err}");
             }
         }
     }
@@ -178,6 +185,7 @@ impl Workspace {
     fn apply_vault_events(&mut self, events: Vec<VaultEvent>, cx: &mut Context<Self>) {
         let mut changed = false;
         for event in events {
+            tracing::info!("watcher: событие {event:?}");
             match event {
                 VaultEvent::Upsert(rel) => {
                     if self.vault.absolute(&rel).is_file() {
@@ -201,7 +209,7 @@ impl Workspace {
     }
 
     /// Открывает заметку во вкладке (или фокусирует уже открытую).
-    pub(crate) fn open_note(&mut self, rel_path: &str, cx: &mut Context<Self>) {
+    pub fn open_note(&mut self, rel_path: &str, cx: &mut Context<Self>) {
         self.open_note_impl(rel_path, cx, true);
     }
 
@@ -233,6 +241,7 @@ impl Workspace {
                 self.tabs.push(Tab {
                     note_id: NoteId::new(rel_path),
                     editor: Editor::from_text(text),
+                    conflict: false,
                 });
                 self.active_tab = self.tabs.len() - 1;
                 self.scroll_px = 0.;
@@ -532,6 +541,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &RenameNote, window, cx| this.open_rename(window, cx)))
             .on_action(cx.listener(|this, _: &NavBack, _, cx| this.navigate_back(cx)))
             .on_action(cx.listener(|this, _: &NavForward, _, cx| this.navigate_forward(cx)))
+            .on_action(cx.listener(|this, _: &SaveNote, _, cx| this.force_save_active(cx)))
+            .on_action(cx.listener(|this, _: &ReloadNote, _, cx| this.reload_active_tab(cx)))
             .size_full()
             .flex()
             .flex_col()

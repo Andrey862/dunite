@@ -77,6 +77,11 @@ fn main() {
                     let mut workspace =
                         Workspace::new(vault, settings, focus_handle, palette_focus);
                     workspace.spawn_watcher(cx);
+                    // DUNITE_OPEN=<путь> — открыть заметку на старте
+                    // (диагностика и будущие e2e-тесты)
+                    if let Ok(rel_path) = std::env::var("DUNITE_OPEN") {
+                        workspace.open_note(&rel_path, cx);
+                    }
                     workspace
                 })
             },
