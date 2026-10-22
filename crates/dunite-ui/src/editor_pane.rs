@@ -496,20 +496,39 @@ impl Workspace {
         block_of(offset).is_some_and(|ix| Some(ix) == block_of(cursor))
     }
 
-    /// Переход по ссылке: резолвинг цели и открытие заметки (упрощённый,
-    /// полный резолвинг ссылок — M3, SPEC §7.2).
+    /// Переход по ссылке: резолвинг через граф (SPEC §7.2); внешние URL
+    /// открываются в системном браузере.
     fn open_link(&mut self, target: &str, cx: &mut Context<Self>) {
         let target = target.trim();
-        let resolved = [format!("{target}.md"), target.to_string()]
-            .into_iter()
-            .find(|rel| self.vault.absolute(rel).is_file())
+        if target.contains("://") || target.starts_with("mailto:") {
+            self.status_message = match open::that(target) {
+                Ok(()) => format!("открыто во внешнем браузере: {target}"),
+                Err(err) => format!("не удалось открыть {target}: {err}"),
+            };
+            cx.notify();
+            return;
+        }
+
+        let from = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| tab.note_id.clone());
+        let resolved = from
+            .and_then(|from| self.graph.resolve(&from, target))
             .or_else(|| {
+                // запасной вариант: прямой путь к файлу (вне графа)
+                let rel = if target.ends_with(".md") {
+                    target.to_string()
+                } else {
+                    format!("{target}.md")
+                };
                 self.vault
-                    .find_note_by_name(target)
-                    .map(|id| id.as_str().to_string())
+                    .absolute(&rel)
+                    .is_file()
+                    .then(|| dunite_vault::NoteId::new(rel))
             });
         match resolved {
-            Some(rel) => self.open_note(&rel, cx),
+            Some(id) => self.open_note(id.as_str(), cx),
             None => {
                 self.status_message = format!("ссылка не найдена: {target}");
                 cx.notify();
@@ -568,6 +587,14 @@ impl Workspace {
                     if workspace.save_generation == generation {
                         if let Some(tab) = workspace.tabs.get_mut(workspace.active_tab) {
                             tab.editor.mark_saved();
+                        }
+                        // граф ссылок держим в курсе правок (SPEC §7.2)
+                        let edited = workspace
+                            .tabs
+                            .get(workspace.active_tab)
+                            .map(|t| t.note_id.clone());
+                        if let Some(id) = edited {
+                            workspace.graph.update_note(&workspace.vault, &id);
                         }
                         cx.notify();
                     }

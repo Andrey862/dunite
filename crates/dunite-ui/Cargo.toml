@@ -8,7 +8,9 @@ rust-version.workspace = true
 [dependencies]
 gpui.workspace = true
 image.workspace = true
+open.workspace = true
 dunite-editor.workspace = true
+dunite-index.workspace = true
 dunite-markdown.workspace = true
 dunite-settings.workspace = true
 dunite-vault.workspace = true

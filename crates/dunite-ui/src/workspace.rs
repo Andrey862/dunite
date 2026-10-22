@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use dunite_editor::Editor;
+use dunite_index::LinkGraph;
 use dunite_markdown::ParsedNote;
 use dunite_settings::Settings;
 use dunite_vault::{NoteId, Vault};
@@ -59,6 +60,8 @@ pub struct Tab {
 /// Рабочая область dunite.
 pub struct Workspace {
     pub(crate) vault: Vault,
+    /// Граф ссылок/тегов (SPEC §7.2): резолвинг, backlinks, теги.
+    pub(crate) graph: LinkGraph,
     pub(crate) settings: Settings,
     pub(crate) palette: Palette,
     /// Развернутые папки дерева (`rel_path`).
@@ -86,8 +89,12 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(vault: Vault, settings: Settings, focus_handle: FocusHandle) -> Self {
         let palette = Palette::for_theme(settings.theme);
+        // полный разбор хранилища при открытии; для больших vault'ов
+        // позже уедет в фон (сейчас это миллисекунды)
+        let graph = LinkGraph::build(&vault);
         Self {
             vault,
+            graph,
             settings,
             palette,
             expanded: HashSet::new(),

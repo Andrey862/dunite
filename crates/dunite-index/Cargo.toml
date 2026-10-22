@@ -6,5 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-dunite-vault.workspace = true
 dunite-markdown.workspace = true
+dunite-vault.workspace = true
+serde.workspace = true
+serde_yml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
