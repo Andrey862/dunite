@@ -5,6 +5,11 @@
 
 use ropey::Rope;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Счётчик экземпляров буфера — для ключей кэшей (кэш раскладки не должен
+/// переживать подмену редактора на новый с той же версией 0).
+static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 /// Текстовый буфер заметки.
 ///
@@ -14,6 +19,7 @@ pub struct Buffer {
     rope: Rope,
     version: u64,
     saved_version: u64,
+    epoch: u64,
 }
 
 impl Buffer {
@@ -22,7 +28,13 @@ impl Buffer {
             rope: Rope::from_str(text.as_ref()),
             version: 0,
             saved_version: 0,
+            epoch: NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    /// Уникальный идентификатор экземпляра буфера (не меняется при правках).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     pub fn text(&self) -> String {
@@ -47,6 +59,10 @@ impl Buffer {
     }
 
     /// Версия буфера; инкрементируется при каждой правке.
+    ///
+    /// Ключ кэшей производных данных (раскладка рендера) — пара
+    /// `(epoch(), version())`: она меняется и при правках, и при подмене
+    /// редактора целиком.
     pub fn version(&self) -> u64 {
         self.version
     }
@@ -179,6 +195,16 @@ mod tests {
         assert!(buffer.is_dirty());
         buffer.mark_saved();
         assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn epoch_changes_on_replacement_not_on_edit() {
+        // ключ кэшей: правки не меняют epoch, подмена буфера — меняет
+        let mut buffer = Buffer::from_text("a");
+        let epoch = buffer.epoch();
+        buffer.edit(1..1, "b");
+        assert_eq!(buffer.epoch(), epoch);
+        assert_ne!(Buffer::from_text("a").epoch(), epoch);
     }
 
     #[test]

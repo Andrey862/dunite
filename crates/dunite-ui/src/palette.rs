@@ -419,6 +419,9 @@ impl Workspace {
     /// Грязные вкладки не трогаем: несохранённые правки важнее диска
     /// (конфликт показываем статус-сообщением, SPEC §14).
     pub(crate) fn reload_all_tabs(&mut self) {
+        // подменяются редакторы (новые, version = 0) — кэш раскладки
+        // по (заметка, версия) протух бы и ломал рендер декораций
+        self.layout = None;
         for tab in &mut self.tabs {
             if tab.editor.is_dirty() {
                 if let Ok(text) = self.vault.read_note(tab.note_id.as_str()) {
@@ -657,6 +660,9 @@ impl Workspace {
                 .left_0()
                 .right_0()
                 .bottom_0()
+                // оверлей перекрывает hitbox'и под собой: иначе колесо мыши
+                // над палитрой прокручивало и заметку за ней
+                .occlude()
                 .flex()
                 .justify_center()
                 .items_start()

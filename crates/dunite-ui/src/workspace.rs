@@ -41,9 +41,10 @@ pub enum ImageState {
 /// Пересчитывается при смене версии буфера. Инкрементальный репарсинг
 /// отдельных блоков — будущая оптимизация; полный парсинг заметки быстр.
 pub struct EditorLayout {
-    /// Заметка, для которой посчитана раскладка (кэш переживает переключение
-    /// вкладок — версии буферов начинаются с 0 и могут совпадать).
-    pub note: String,
+    /// Ключ кэша: уникальный идентификатор экземпляра буфера.
+    /// Кэш не переживает ни правки (version), ни подмену редактора (epoch) —
+    /// раньше протухание ломало рендер после внешних изменений.
+    pub epoch: u64,
     pub version: u64,
     /// Ширина панели, для которой посчитаны размеры картинок.
     pub width: f32,
@@ -335,9 +336,9 @@ impl Workspace {
             return;
         };
         let version = tab.editor.version();
-        let note = tab.note_id.as_str().to_string();
+        let epoch = tab.editor.buffer().epoch();
         if self.layout.as_ref().is_some_and(|layout| {
-            layout.note == note && layout.version == version && (layout.width - width).abs() < 2.
+            layout.epoch == epoch && layout.version == version && (layout.width - width).abs() < 2.
         }) {
             return;
         }
@@ -393,7 +394,7 @@ impl Workspace {
         tops.push(acc);
 
         self.layout = Some(EditorLayout {
-            note,
+            epoch,
             version,
             width,
             parsed,

@@ -656,6 +656,8 @@ impl Workspace {
                 let max = tab.editor.buffer().len_chars();
                 tab.editor.set_cursor(cursor.min(max), false);
                 tab.conflict = false;
+                // новый редактор (version = 0) — сбрасываем кэш раскладки
+                self.layout = None;
                 self.status_message = format!("{rel_path}: перечитано с диска");
             }
             Err(err) => {
