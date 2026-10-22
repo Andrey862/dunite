@@ -4,6 +4,7 @@
 //! через штатный IME-механизм gpui (EntityInputHandler маршрутизирует
 //! ввод в палитру, пока она открыта).
 
+use dunite_index::SearchHit;
 use dunite_vault::NoteId;
 use gpui::{
     App, Bounds, Context, Element, ElementId, Entity, GlobalElementId, InspectorElementId,
@@ -18,8 +19,31 @@ use crate::workspace::Workspace;
 pub enum PaletteMode {
     /// Быстрый переход по заметкам.
     QuickSwitcher,
+    /// Полнотекстовый поиск (SPEC §11).
+    Search,
     /// Переименование заметки (с переписыванием ссылок).
     Rename { note: NoteId },
+}
+
+/// Результаты палитры.
+pub enum PaletteResults {
+    /// Заметки (quick switcher).
+    Notes(Vec<NoteId>),
+    /// Результаты поиска со сниппетами.
+    Hits(Vec<SearchHit>),
+}
+
+impl PaletteResults {
+    fn len(&self) -> usize {
+        match self {
+            PaletteResults::Notes(ids) => ids.len(),
+            PaletteResults::Hits(hits) => hits.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Состояние открытой палитры.
@@ -27,7 +51,7 @@ pub struct PaletteState {
     pub mode: PaletteMode,
     pub query: String,
     pub selected: usize,
-    pub matches: Vec<NoteId>,
+    pub results: PaletteResults,
 }
 
 impl Workspace {
@@ -38,7 +62,19 @@ impl Workspace {
             mode: PaletteMode::QuickSwitcher,
             query: String::new(),
             selected: 0,
-            matches,
+            results: PaletteResults::Notes(matches),
+        });
+        self.palette_focus.focus(window);
+        cx.notify();
+    }
+
+    /// Открывает полнотекстовый поиск (Ctrl+Shift+F, SPEC §11).
+    pub(crate) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_state = Some(PaletteState {
+            mode: PaletteMode::Search,
+            query: String::new(),
+            selected: 0,
+            results: PaletteResults::Hits(Vec::new()),
         });
         self.palette_focus.focus(window);
         cx.notify();
@@ -55,7 +91,7 @@ impl Workspace {
             mode: PaletteMode::Rename { note },
             query,
             selected: 0,
-            matches: Vec::new(),
+            results: PaletteResults::Notes(Vec::new()),
         });
         self.palette_focus.focus(window);
         cx.notify();
@@ -74,12 +110,7 @@ impl Workspace {
             return;
         };
         state.query.push_str(text);
-        state.selected = 0;
-        let query = state.query.clone();
-        let matches = self.switcher_matches(&query);
-        if let Some(state) = self.palette_state.as_mut() {
-            state.matches = matches;
-        }
+        self.refresh_palette_results();
         cx.notify();
     }
 
@@ -88,13 +119,29 @@ impl Workspace {
             return;
         };
         state.query.pop();
-        state.selected = 0;
-        let query = state.query.clone();
-        let matches = self.switcher_matches(&query);
-        if let Some(state) = self.palette_state.as_mut() {
-            state.matches = matches;
-        }
+        self.refresh_palette_results();
         cx.notify();
+    }
+
+    /// Пересчёт результатов по текущему запросу (поиск — по мере ввода).
+    fn refresh_palette_results(&mut self) {
+        let Some(state) = self.palette_state.as_mut() else {
+            return;
+        };
+        let query = state.query.clone();
+        let is_search = matches!(state.mode, PaletteMode::Search);
+        let is_switcher = matches!(state.mode, PaletteMode::QuickSwitcher);
+        let results = if is_search {
+            PaletteResults::Hits(self.graph.search(&query))
+        } else if is_switcher {
+            PaletteResults::Notes(self.switcher_matches(&query))
+        } else {
+            PaletteResults::Notes(Vec::new())
+        };
+        if let Some(state) = self.palette_state.as_mut() {
+            state.results = results;
+            state.selected = 0;
+        }
     }
 
     /// Перемещение выбора в списке результатов.
@@ -102,30 +149,42 @@ impl Workspace {
         let Some(state) = self.palette_state.as_mut() else {
             return;
         };
-        if state.matches.is_empty() {
+        if state.results.is_empty() {
             return;
         }
-        let len = state.matches.len() as isize;
+        let len = state.results.len() as isize;
         let next = (state.selected as isize + delta).rem_euclid(len) as usize;
         state.selected = next;
         cx.notify();
     }
 
-    /// Enter: открыть выбранную заметку или выполнить переименование.
+    /// Enter: открыть выбранное или выполнить переименование.
     pub(crate) fn palette_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.palette_state.take() else {
             return;
         };
         self.focus_handle.focus(window);
-        match state.mode {
-            PaletteMode::QuickSwitcher => {
-                if let Some(id) = state.matches.into_iter().nth(state.selected) {
+        match (state.mode, state.results) {
+            (PaletteMode::QuickSwitcher, PaletteResults::Notes(ids)) => {
+                if let Some(id) = ids.into_iter().nth(state.selected) {
                     self.open_note(id.as_str(), cx);
                 }
             }
-            PaletteMode::Rename { note } => {
+            (PaletteMode::Search, PaletteResults::Hits(hits)) => {
+                if let Some(hit) = hits.into_iter().nth(state.selected) {
+                    // переход к первой строке со совпадением
+                    let line = hit
+                        .snippets
+                        .first()
+                        .map(|snippet| snippet.line)
+                        .unwrap_or(0);
+                    self.open_note_at_line(hit.id.as_str(), line, cx);
+                }
+            }
+            (PaletteMode::Rename { note }, _) => {
                 self.rename_note_to(&note, &state.query, cx);
             }
+            _ => {}
         }
         cx.notify();
     }
@@ -249,6 +308,7 @@ impl Workspace {
         let state = self.palette_state.as_ref()?;
         let title = match state.mode {
             PaletteMode::QuickSwitcher => "Переход к заметке",
+            PaletteMode::Search => "Поиск: слова, \"фраза\", tag:, path:, link: — Enter открыть",
             PaletteMode::Rename { .. } => "Переименование (ссылки будут обновлены)",
         };
 
@@ -291,39 +351,91 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &PaletteNext, _, cx| this.palette_move(1, cx)))
             .on_action(cx.listener(|this, _: &PalettePrev, _, cx| this.palette_move(-1, cx)))
             .on_action(cx.listener(|this, _: &PaletteBackspace, _, cx| this.palette_backspace(cx)))
-            .children(state.matches.iter().enumerate().map(|(ix, id)| {
-                let is_selected = ix == state.selected;
-                let rel_path = id.as_str().to_string();
-                let title = self
-                    .graph
-                    .meta(id)
-                    .map(|meta| meta.title.clone())
-                    .unwrap_or_else(|| id.file_stem().to_string());
-                let open_path = rel_path.clone();
-                div()
-                    .id(gpui::SharedString::from(format!("palette-row:{rel_path}")))
-                    .px_3()
-                    .py_1()
-                    .cursor_pointer()
-                    .bg(if is_selected {
-                        self.palette.hover
-                    } else {
-                        self.palette.background
-                    })
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        this.palette_state = None;
-                        this.focus_handle.focus(window);
-                        this.open_note(&open_path, cx);
-                        cx.notify();
-                    }))
-                    .child(div().text_size(px(13.)).child(title))
-                    .child(
+            .children(match &state.results {
+                PaletteResults::Notes(ids) => ids
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, id)| {
+                        let is_selected = ix == state.selected;
+                        let rel_path = id.as_str().to_string();
+                        let title = self
+                            .graph
+                            .meta(id)
+                            .map(|meta| meta.title.clone())
+                            .unwrap_or_else(|| id.file_stem().to_string());
+                        let open_path = rel_path.clone();
                         div()
-                            .text_size(px(10.))
-                            .text_color(self.palette.text_muted)
-                            .child(rel_path),
-                    )
-            }));
+                            .id(gpui::SharedString::from(format!("palette-row:{rel_path}")))
+                            .px_3()
+                            .py_1()
+                            .cursor_pointer()
+                            .bg(if is_selected {
+                                self.palette.hover
+                            } else {
+                                self.palette.background
+                            })
+                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                this.palette_state = None;
+                                this.focus_handle.focus(window);
+                                this.open_note(&open_path, cx);
+                                cx.notify();
+                            }))
+                            .child(div().text_size(px(13.)).child(title))
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(self.palette.text_muted)
+                                    .child(rel_path),
+                            )
+                            .into_any_element()
+                    })
+                    .collect::<Vec<_>>(),
+                PaletteResults::Hits(hits) => hits
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, hit)| {
+                        let is_selected = ix == state.selected;
+                        let rel_path = hit.id.as_str().to_string();
+                        let title = self
+                            .graph
+                            .meta(&hit.id)
+                            .map(|meta| meta.title.clone())
+                            .unwrap_or_else(|| hit.id.file_stem().to_string());
+                        let open_path = rel_path.clone();
+                        let line = hit.snippets.first().map(|s| s.line).unwrap_or(0);
+                        div()
+                            .id(gpui::SharedString::from(format!("palette-hit:{rel_path}")))
+                            .px_3()
+                            .py_1()
+                            .cursor_pointer()
+                            .bg(if is_selected {
+                                self.palette.hover
+                            } else {
+                                self.palette.background
+                            })
+                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                this.palette_state = None;
+                                this.focus_handle.focus(window);
+                                this.open_note_at_line(&open_path, line, cx);
+                                cx.notify();
+                            }))
+                            .child(div().text_size(px(13.)).child(title))
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(self.palette.text_muted)
+                                    .child(rel_path),
+                            )
+                            .children(
+                                hit.snippets
+                                    .iter()
+                                    .map(|snippet| self.render_snippet(snippet)),
+                            )
+                            .into_any_element()
+                    })
+                    .collect::<Vec<_>>(),
+            })
+            .children(self.palette_hint(state));
 
         Some(
             div()
@@ -347,6 +459,71 @@ impl Workspace {
                     },
                 ))
                 .into_any_element(),
+        )
+    }
+
+    /// Сниппет результата поиска: сегменты с подсветкой совпадений.
+    fn render_snippet(&self, snippet: &dunite_index::Snippet) -> impl IntoElement {
+        let mut spans = Vec::new();
+        let mut pos = 0usize;
+        for (start, end) in &snippet.ranges {
+            if *start > pos {
+                spans.push(self.snippet_span(&snippet.text[pos..*start], false));
+            }
+            spans.push(self.snippet_span(&snippet.text[*start..*end], true));
+            pos = *end;
+        }
+        if pos < snippet.text.len() {
+            spans.push(self.snippet_span(&snippet.text[pos..], false));
+        }
+        if spans.is_empty() {
+            spans.push(self.snippet_span(&snippet.text, false));
+        }
+        div()
+            .flex()
+            .flex_wrap()
+            .mt_1()
+            .text_size(px(11.))
+            .children(spans)
+    }
+
+    fn snippet_span(&self, text: &str, matched: bool) -> impl IntoElement {
+        div()
+            .px_0p5()
+            .bg(if matched {
+                self.palette.selection
+            } else {
+                self.palette.background
+            })
+            .text_color(if matched {
+                self.palette.text
+            } else {
+                self.palette.text_muted
+            })
+            .child(text.to_string())
+    }
+
+    /// Подсказка внизу панели: пустой запрос или отсутствие результатов.
+    fn palette_hint(&self, state: &PaletteState) -> Option<impl IntoElement> {
+        if !state.results.is_empty() {
+            return None;
+        }
+        let hint = if state.query.trim().is_empty() {
+            match state.mode {
+                PaletteMode::Search => "Введите запрос — поиск идёт по мере ввода",
+                PaletteMode::QuickSwitcher => "Введите имя заметки",
+                PaletteMode::Rename { .. } => return None,
+            }
+        } else {
+            "Ничего не найдено"
+        };
+        Some(
+            div()
+                .px_3()
+                .py_2()
+                .text_size(px(11.))
+                .text_color(self.palette.text_muted)
+                .child(hint),
         )
     }
 }

@@ -59,7 +59,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 /// Привязки вне контекста редактора (управление вкладками, выход).
 pub fn global_key_bindings() -> Vec<KeyBinding> {
     use crate::actions::{
-        CloseTab, NavBack, NavForward, NextTab, OpenSwitcher, PrevTab, Quit, RenameNote,
+        CloseTab, NavBack, NavForward, NextTab, OpenSearch, OpenSwitcher, PrevTab, Quit, RenameNote,
     };
     vec![
         KeyBinding::new("ctrl-w", CloseTab, None),
@@ -68,6 +68,7 @@ pub fn global_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-q", Quit, None),
         // палитра и навигация (SPEC §9.4, §8.3)
         KeyBinding::new("ctrl-p", OpenSwitcher, None),
+        KeyBinding::new("ctrl-shift-f", OpenSearch, None),
         KeyBinding::new("f2", RenameNote, None),
         KeyBinding::new("alt-left", NavBack, None),
         KeyBinding::new("alt-right", NavForward, None),

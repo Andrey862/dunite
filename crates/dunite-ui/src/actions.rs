@@ -52,8 +52,9 @@ actions!(
 actions!(
     dunite,
     [
-        // палитра: quick switcher и переименование (SPEC §9.4)
+        // палитра: quick switcher, поиск и переименование (SPEC §9.4, §11)
         OpenSwitcher,
+        OpenSearch,
         RenameNote,
         // навигация back/forward (SPEC §8.3)
         NavBack,

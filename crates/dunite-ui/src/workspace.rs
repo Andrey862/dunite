@@ -15,7 +15,7 @@ use dunite_vault::{NoteId, Vault};
 use gpui::{Context, FocusHandle, FontWeight, Render, RenderImage, Window, div, prelude::*, px};
 
 use crate::actions::{
-    CloseTab, NavBack, NavForward, NextTab, OpenSwitcher, PrevTab, Quit, RenameNote,
+    CloseTab, NavBack, NavForward, NextTab, OpenSearch, OpenSwitcher, PrevTab, Quit, RenameNote,
 };
 use crate::decor;
 use crate::editor_element::PaintState;
@@ -528,6 +528,7 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &OpenSwitcher, window, cx| this.open_switcher(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &OpenSearch, window, cx| this.open_search(window, cx)))
             .on_action(cx.listener(|this, _: &RenameNote, window, cx| this.open_rename(window, cx)))
             .on_action(cx.listener(|this, _: &NavBack, _, cx| this.navigate_back(cx)))
             .on_action(cx.listener(|this, _: &NavForward, _, cx| this.navigate_forward(cx)))
