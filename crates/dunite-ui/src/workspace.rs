@@ -66,6 +66,8 @@ pub struct Workspace {
     pub(crate) palette: Palette,
     /// Развернутые папки дерева (`rel_path`).
     pub(crate) expanded: HashSet<String>,
+    /// Развернутые теги в панели тегов.
+    pub(crate) expanded_tags: HashSet<String>,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active_tab: usize,
     pub(crate) status_message: String,
@@ -98,6 +100,7 @@ impl Workspace {
             settings,
             palette,
             expanded: HashSet::new(),
+            expanded_tags: HashSet::new(),
             tabs: Vec::new(),
             active_tab: 0,
             status_message: String::new(),
@@ -407,7 +410,8 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .child(self.render_file_tree(cx))
-                    .child(self.render_editor_column(cx)),
+                    .child(self.render_editor_column(cx))
+                    .child(self.render_right_sidebar(cx)),
             )
             .child(self.render_status_bar())
     }

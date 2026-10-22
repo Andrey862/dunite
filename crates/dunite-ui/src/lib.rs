@@ -7,6 +7,7 @@ pub mod editor_pane;
 pub mod file_tree;
 pub mod images;
 pub mod keys;
+pub mod sidebar;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod theme;
