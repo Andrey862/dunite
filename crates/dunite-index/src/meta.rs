@@ -52,4 +52,6 @@ pub struct NoteMeta {
     pub tags: Vec<String>,
     pub headings: Vec<NoteHeading>,
     pub links: Vec<ResolvedLink>,
+    /// Полный текст заметки — для фразового поиска и сниппетов (SPEC §11).
+    pub body: String,
 }

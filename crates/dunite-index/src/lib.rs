@@ -7,7 +7,9 @@
 mod graph;
 mod meta;
 mod parse;
+mod search;
 
 pub use graph::{BacklinkRef, LinkGraph};
 pub use meta::{LinkKind, NoteHeading, NoteMeta, ResolvedLink};
 pub use parse::parse_note;
+pub use search::{SearchHit, SearchQuery, Snippet};

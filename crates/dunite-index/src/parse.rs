@@ -103,6 +103,7 @@ pub fn parse_note(vault: &Vault, id: &NoteId) -> NoteMeta {
         tags,
         headings,
         links,
+        body: text,
     }
 }
 

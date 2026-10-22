@@ -4,10 +4,11 @@
 //! теги, заголовки), исходящие ссылки с резолвингом и обратные ссылки.
 //! Строится по хранилищу целиком, обновляется по одной заметке.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::meta::{LinkKind, NoteMeta};
 use crate::parse::parse_note;
+use crate::search::{self, SearchHit, Snippet};
 use dunite_vault::{NoteId, Vault};
 
 /// Обратная ссылка: `source` ссылается на цель.
@@ -36,6 +37,8 @@ pub struct LinkGraph {
     backlinks: HashMap<NoteId, Vec<BacklinkRef>>,
     /// Индекс имён для резолвинга: нормализованное имя → кандидаты.
     name_index: HashMap<String, Vec<NoteId>>,
+    /// Полнотекстовые постинги (SPEC §11): токен → (заметка, частота).
+    postings: HashMap<String, Vec<(NoteId, u32)>>,
 }
 
 impl LinkGraph {
@@ -50,6 +53,7 @@ impl LinkGraph {
             for alias in &meta.aliases {
                 graph.index_name(&meta.id, alias);
             }
+            graph.index_text(&meta.id, &meta.body);
             graph.metas.insert(meta.id.clone(), meta);
         }
         graph.resolve_all();
@@ -58,8 +62,9 @@ impl LinkGraph {
 
     /// Перечитывает одну заметку (после правки/переименования).
     pub fn update_note(&mut self, vault: &Vault, id: &NoteId) {
-        // убрать старые записи: имена и обратные ссылки от этой заметки
+        // убрать старые записи: имена, постинги и обратные ссылки
         self.unindex_names(id);
+        self.unindex_text(id);
         self.backlinks
             .values_mut()
             .for_each(|refs| refs.retain(|r| &r.source != id));
@@ -70,6 +75,7 @@ impl LinkGraph {
         for alias in &meta.aliases {
             self.index_name(&meta.id, alias);
         }
+        self.index_text(&meta.id, &meta.body);
         self.metas.insert(meta.id.clone(), meta);
 
         // резолвим ссылки заново: изменившиеся имена влияют на чужие ссылки,
@@ -82,6 +88,7 @@ impl LinkGraph {
     pub fn remove_note(&mut self, id: &NoteId) {
         self.metas.remove(id);
         self.unindex_names(id);
+        self.unindex_text(id);
         self.backlinks
             .values_mut()
             .for_each(|refs| refs.retain(|r| &r.source != id));
@@ -163,6 +170,152 @@ impl LinkGraph {
     /// Заметки для quick switcher: (id, заголовок).
     pub fn notes(&self) -> impl Iterator<Item = (&NoteId, &NoteMeta)> {
         self.metas.iter()
+    }
+
+    /// Полнотекстовый поиск (SPEC §11).
+    ///
+    /// Язык запросов: слова (AND), `"фразы"`, фильтры `tag:`, `path:`,
+    /// `link:`. Сортировка — по убыванию релевантности (BM25).
+    pub fn search(&self, raw: &str) -> Vec<SearchHit> {
+        let query = search::parse_query(raw);
+        let nothing_to_find = query.is_empty()
+            && query.tags.is_empty()
+            && query.paths.is_empty()
+            && query.links.is_empty();
+        if nothing_to_find {
+            return Vec::new();
+        }
+
+        // кандидаты: пересечение постингов по словам (AND)
+        let mut candidates: Option<HashSet<NoteId>> = None;
+        for term in &query.terms {
+            let docs: HashSet<NoteId> = self.docs_for_term(term).into_keys().collect();
+            candidates = Some(match candidates {
+                Some(previous) => previous.intersection(&docs).cloned().collect(),
+                None => docs,
+            });
+            if candidates.as_ref().is_some_and(|set| set.is_empty()) {
+                return Vec::new();
+            }
+        }
+        let candidates: HashSet<NoteId> = match candidates {
+            Some(set) => set,
+            None => self.metas.keys().cloned().collect(),
+        };
+
+        let total = self.metas.len();
+        let mut hits = Vec::new();
+        for id in candidates {
+            let Some(meta) = self.metas.get(&id) else {
+                continue;
+            };
+            let body_lower = meta.body.to_lowercase();
+
+            if !query
+                .phrases
+                .iter()
+                .all(|phrase| body_lower.contains(phrase.as_str()))
+            {
+                continue;
+            }
+            if !query.tags.iter().all(|tag| {
+                meta.tags
+                    .iter()
+                    .any(|t| t == tag || t.starts_with(&format!("{tag}/")))
+            }) {
+                continue;
+            }
+            if !query
+                .paths
+                .iter()
+                .all(|path| id.as_str().to_lowercase().contains(path.as_str()))
+            {
+                continue;
+            }
+            if !query.links.iter().all(|target| {
+                meta.links.iter().any(|link| {
+                    link.target_text.to_lowercase().contains(target.as_str())
+                        || self
+                            .resolve(&id, &link.target_text)
+                            .is_some_and(|resolved| {
+                                resolved.file_stem().to_lowercase() == *target
+                                    || resolved.as_str().to_lowercase() == *target
+                            })
+                })
+            }) {
+                continue;
+            }
+
+            // релевантность: BM25-подобная сумма по словам и фразам
+            let mut score = 0f32;
+            for term in &query.terms {
+                let (tf, df) = self.term_stats(term, &id);
+                score += search::term_score(tf, df, total);
+            }
+            for phrase in &query.phrases {
+                let tf = body_lower.matches(phrase.as_str()).count() as u32;
+                let df = self
+                    .metas
+                    .values()
+                    .filter(|meta| meta.body.to_lowercase().contains(phrase.as_str()))
+                    .count();
+                score += search::term_score(tf.max(1), df, total);
+            }
+
+            let needles = query.needles();
+            let snippets = if needles.is_empty() {
+                // запрос только из фильтров — первая строка заметки
+                meta.body
+                    .lines()
+                    .next()
+                    .map(|line| {
+                        vec![Snippet {
+                            line: 0,
+                            text: line.to_string(),
+                            ranges: Vec::new(),
+                        }]
+                    })
+                    .unwrap_or_default()
+            } else {
+                search::build_snippets(&meta.body, &needles)
+            };
+
+            hits.push(SearchHit {
+                id,
+                score,
+                snippets,
+            });
+        }
+
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        hits
+    }
+
+    /// Заметки с термином: подстрочное совпадение токенов (как в Obsidian —
+    /// «ежик» находит «ежиком»). Возвращает суммарную частоту по заметке.
+    fn docs_for_term(&self, term: &str) -> HashMap<NoteId, u32> {
+        let mut totals: HashMap<NoteId, u32> = HashMap::new();
+        for (token, entries) in &self.postings {
+            if !token.contains(term) {
+                continue;
+            }
+            for (id, count) in entries {
+                *totals.entry(id.clone()).or_default() += count;
+            }
+        }
+        totals
+    }
+
+    /// Частота термина в заметке и число документов с ним.
+    fn term_stats(&self, term: &str, id: &NoteId) -> (u32, usize) {
+        let docs = self.docs_for_term(term);
+        let tf = docs.get(id).copied().unwrap_or(0);
+        (tf, docs.len())
     }
 
     /// Переименовывает заметку и переписывает все ссылающиеся ссылки
@@ -257,6 +410,27 @@ impl LinkGraph {
         if !entry.contains(id) {
             entry.push(id.clone());
         }
+    }
+
+    /// Полнотекстовые постинги заметки (SPEC §11).
+    fn index_text(&mut self, id: &NoteId, body: &str) {
+        let mut frequencies: HashMap<String, u32> = HashMap::new();
+        for token in search::tokenize(body) {
+            *frequencies.entry(token).or_default() += 1;
+        }
+        for (token, count) in frequencies {
+            self.postings
+                .entry(token)
+                .or_default()
+                .push((id.clone(), count));
+        }
+    }
+
+    fn unindex_text(&mut self, id: &NoteId) {
+        self.postings.retain(|_, entries| {
+            entries.retain(|(entry_id, _)| entry_id != id);
+            !entries.is_empty()
+        });
     }
 
     fn unindex_names(&mut self, id: &NoteId) {
@@ -520,5 +694,97 @@ mod tests {
         // каноническая ссылка (имя файла) переписывается без надписи
         let alpha = vault.read_note("projects/Alpha.md").unwrap();
         assert!(alpha.contains("Ссылка на [[Дом]]"), "{alpha}");
+    }
+
+    // ── поиск (SPEC §11) ────────────────────────────────────────────────
+
+    fn search_fixture() -> (tempfile::TempDir, LinkGraph, Vault) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("projects")).unwrap();
+        fs::write(
+            root.join("Первая.md"),
+            "---\ntags: [работа]\n---\n\nдизайн системы поиска\nвторая строка\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("projects/Вторая.md"),
+            "поиска много\nпоиска и дизайн\n",
+        )
+        .unwrap();
+        fs::write(root.join("Третья.md"), "совсем другое\n").unwrap();
+        fs::write(root.join("Четвёртая.md"), "ссылка на [[Первая]]\n").unwrap();
+        let vault = Vault::open(root).unwrap();
+        let graph = LinkGraph::build(&vault);
+        (dir, graph, vault)
+    }
+
+    #[test]
+    fn search_and_semantics_with_filters() {
+        let (_dir, graph, _vault) = search_fixture();
+
+        // AND по словам: оба слова есть в двух заметках
+        let hits = graph.search("поиска дизайн");
+        let mut ids: Vec<&str> = hits.iter().map(|hit| hit.id.as_str()).collect();
+        ids.sort();
+        // байтовый порядок: «projects/...» < «Первая.md»
+        assert_eq!(ids, vec!["projects/Вторая.md", "Первая.md"]);
+
+        // фраза — только точное соседство
+        let hits = graph.search("\"поиска много\"");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id.as_str(), "projects/Вторая.md");
+
+        // фильтр тега
+        let hits = graph.search("tag:работа");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id.as_str(), "Первая.md");
+
+        // фильтр пути + слово
+        let hits = graph.search("поиска path:projects");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id.as_str(), "projects/Вторая.md");
+
+        // фильтр ссылки
+        let hits = graph.search("link:Первая");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id.as_str(), "Четвёртая.md");
+
+        // пустой запрос результатов не даёт
+        assert!(graph.search("   ").is_empty());
+    }
+
+    #[test]
+    fn search_ranks_by_frequency() {
+        let (_dir, graph, _vault) = search_fixture();
+        let hits = graph.search("поиска");
+        assert_eq!(hits.len(), 2);
+        // «Вторая» содержит слово дважды — выше
+        assert_eq!(hits[0].id.as_str(), "projects/Вторая.md");
+        assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn search_snippets_have_match_ranges() {
+        let (_dir, graph, _vault) = search_fixture();
+        let hits = graph.search("дизайн");
+        assert!(!hits[0].snippets.is_empty());
+        assert!(
+            hits[0]
+                .snippets
+                .iter()
+                .any(|snippet| !snippet.ranges.is_empty())
+        );
+    }
+
+    #[test]
+    fn search_reindexes_on_update() {
+        let (_dir, mut graph, vault) = search_fixture();
+        assert!(graph.search("ежик").is_empty());
+        fs::write(vault.absolute("Третья.md"), "новый текст с ежиком\n").unwrap();
+        graph.update_note(&vault, &NoteId::new("Третья.md"));
+        let hits = graph.search("ежик");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id.as_str(), "Третья.md");
     }
 }
