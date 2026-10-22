@@ -93,9 +93,15 @@ impl Workspace {
                 meta.links
                     .iter()
                     .filter(|link| {
-                        active_id.as_ref().is_some_and(|from| {
-                            self.graph.resolve(from, &link.target_text).is_none()
-                        })
+                        // внешние URL и вложения — не ссылки на заметки
+                        // (SPEC §7.2, §7.5)
+                        let external = link.target_text.contains("://")
+                            || link.target_text.starts_with("mailto:");
+                        !external
+                            && link.kind != dunite_index::LinkKind::Embed
+                            && active_id.as_ref().is_some_and(|from| {
+                                self.graph.resolve(from, &link.target_text).is_none()
+                            })
                     })
                     .map(|link| link.target_text.clone())
                     .collect()

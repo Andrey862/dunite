@@ -169,6 +169,8 @@ impl Workspace {
         self.save_all();
         match self.graph.rename_note(&self.vault, from, &to) {
             Ok(updated) => {
+                // дерево файлов тоже должно увидеть новое имя
+                let _ = self.vault.rescan();
                 self.reload_tabs_after_rename(from, &to);
                 self.status_message = format!(
                     "переименовано в {}: обновлено ссылок: {updated}",
@@ -311,12 +313,22 @@ impl Workspace {
 
         Some(
             div()
+                .id("palette-overlay")
                 .absolute()
                 .inset_0()
+                .flex_col()
                 .items_center()
                 .justify_start()
                 .pt(px(96.))
-                .child(panel)
+                .bg(gpui::hsla(0., 0., 0., 0.35))
+                // клик мимо панели закрывает палитру; сама панель ниже
+                // останавливает всплытие, чтобы не закрыться при клике внутри
+                .on_click(cx.listener(|this, _event, window, cx| this.close_palette(window, cx)))
+                .child(panel.id("palette-panel").on_click(
+                    |_event: &gpui::ClickEvent, _window: &mut Window, cx: &mut App| {
+                        cx.stop_propagation();
+                    },
+                ))
                 .into_any_element(),
         )
     }
