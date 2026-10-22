@@ -5,6 +5,7 @@
 //! теги, вложения, watcher (M2/M3).
 
 mod id;
+pub mod watch;
 
 pub use id::NoteId;
 

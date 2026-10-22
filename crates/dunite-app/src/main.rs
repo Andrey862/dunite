@@ -74,7 +74,10 @@ fn main() {
                     let focus_handle = cx.focus_handle();
                     let palette_focus = cx.focus_handle();
                     focus_handle.focus(window);
-                    Workspace::new(vault, settings, focus_handle, palette_focus)
+                    let mut workspace =
+                        Workspace::new(vault, settings, focus_handle, palette_focus);
+                    workspace.spawn_watcher(cx);
+                    workspace
                 })
             },
         )

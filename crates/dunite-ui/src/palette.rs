@@ -194,9 +194,23 @@ impl Workspace {
         self.reload_all_tabs();
     }
 
-    /// Перечитывает все вкладки с диска, сохраняя позиции курсора.
+    /// Перечитывает вкладки с диска, сохраняя позиции курсора.
+    ///
+    /// Грязные вкладки не трогаем: несохранённые правки важнее диска
+    /// (конфликт показываем статус-сообщением, SPEC §14).
     pub(crate) fn reload_all_tabs(&mut self) {
         for tab in &mut self.tabs {
+            if tab.editor.is_dirty() {
+                if let Ok(text) = self.vault.read_note(tab.note_id.as_str()) {
+                    if text != tab.editor.text() {
+                        self.status_message = format!(
+                            "{} изменён снаружи и не совпадает с редактором",
+                            tab.note_id.as_str()
+                        );
+                    }
+                }
+                continue;
+            }
             let Ok(text) = self.vault.read_note(tab.note_id.as_str()) else {
                 continue;
             };

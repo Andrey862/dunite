@@ -10,6 +10,7 @@ use dunite_editor::Editor;
 use dunite_index::LinkGraph;
 use dunite_markdown::ParsedNote;
 use dunite_settings::Settings;
+use dunite_vault::watch::{VaultEvent, VaultWatcher};
 use dunite_vault::{NoteId, Vault};
 use gpui::{Context, FocusHandle, FontWeight, Render, RenderImage, Window, div, prelude::*, px};
 
@@ -79,6 +80,8 @@ pub struct Workspace {
     /// История навигации назад/вперёд (SPEC §8.3): (заметка, смещение).
     pub(crate) nav_back: Vec<(NoteId, usize)>,
     pub(crate) nav_forward: Vec<(NoteId, usize)>,
+    /// Наблюдатель за внешними изменениями файлов (SPEC §11).
+    pub(crate) watcher: Option<VaultWatcher>,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active_tab: usize,
     pub(crate) status_message: String,
@@ -131,7 +134,69 @@ impl Workspace {
             palette_focus,
             nav_back: Vec::new(),
             nav_forward: Vec::new(),
+            watcher: None,
             save_generation: 0,
+        }
+    }
+
+    /// Запускает фоновое наблюдение за внешними изменениями файлов.
+    pub fn spawn_watcher(&mut self, cx: &mut Context<Self>) {
+        match VaultWatcher::new(self.vault.root()) {
+            Ok(watcher) => {
+                self.watcher = Some(watcher);
+                cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(200))
+                            .await;
+                        let batch = this
+                            .update(cx, |workspace, _| {
+                                workspace
+                                    .watcher
+                                    .as_mut()
+                                    .map(|watcher| watcher.drain())
+                                    .unwrap_or_default()
+                            })
+                            .unwrap_or_default();
+                        if !batch.is_empty() {
+                            this.update(cx, |workspace, cx| {
+                                workspace.apply_vault_events(batch, cx)
+                            })
+                            .ok();
+                        }
+                    }
+                })
+                .detach();
+            }
+            Err(err) => {
+                self.status_message = format!("watcher недоступен: {err}");
+            }
+        }
+    }
+
+    /// Применяет пачку внешних изменений: граф, дерево, открытые вкладки.
+    fn apply_vault_events(&mut self, events: Vec<VaultEvent>, cx: &mut Context<Self>) {
+        let mut changed = false;
+        for event in events {
+            match event {
+                VaultEvent::Upsert(rel) => {
+                    if self.vault.absolute(&rel).is_file() {
+                        self.graph.update_note(&self.vault, &NoteId::new(&rel));
+                        self.status_message = format!("внешнее изменение: {rel}");
+                        changed = true;
+                    }
+                }
+                VaultEvent::Remove(rel) => {
+                    self.graph.remove_note(&NoteId::new(&rel));
+                    self.status_message = format!("файл удалён снаружи: {rel}");
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            let _ = self.vault.rescan();
+            self.reload_all_tabs();
+            cx.notify();
         }
     }
 
