@@ -411,10 +411,14 @@ impl Element for EditorElement {
             }
 
             // inline-миниатюры (SPEC §8.2): standalone-строки рисуются
-            // крупной картинкой ниже — их пропускаем
+            // крупной картинкой ниже — их пропускаем; в активном блоке
+            // виден сырой синтаксис, миниатюра поверх не нужна
             let mut inline_images = Vec::new();
-            for block in &layout.parsed.blocks {
+            for (block_ix, block) in layout.parsed.blocks.iter().enumerate() {
                 if block.range.end <= content.start || block.range.start >= content.end {
+                    continue;
+                }
+                if revealed.contains(&block_ix) {
                     continue;
                 }
                 for inline in &block.inlines {

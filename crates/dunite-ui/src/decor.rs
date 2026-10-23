@@ -111,6 +111,13 @@ pub struct LineDecor {
 pub const DEFAULT_HEIGHT: f32 = 20.;
 pub const DEFAULT_FONT_SIZE: f32 = 13.;
 
+/// Ширина плашки inline-картинки (в символах моноширинного шрифта):
+/// фиксированная под миниатюру, чтобы не оставлять дыру после неё.
+const IMAGE_CHIP_WIDTH: usize = 8;
+
+/// Высота строки с inline-миниатюрой — картинка вписывается в строку.
+const IMAGE_LINE_HEIGHT: f32 = 36.;
+
 /// Цель standalone-картинки на строке (строка целиком занята embed'ом).
 ///
 /// `line_text` — содержимое строки; возвращает char-диапазон цели embed'а.
@@ -187,7 +194,8 @@ pub fn decorate_line(
     let block = block_ix.and_then(|ix| parsed.blocks.get(ix));
     let active = block_ix.is_some_and(|ix| revealed_blocks.contains(&ix));
 
-    let (height, font_size) = line_metrics(block.map(|b| &b.kind));
+    let (mut height, font_size) = line_metrics(block.map(|b| &b.kind));
+    let mut has_image_chip = false;
     let base_style = match block.map(|b| &b.kind) {
         Some(BlockKind::Heading { level, .. }) => SegStyle::heading(*level),
         Some(BlockKind::Quote { .. }) | Some(BlockKind::Frontmatter) => SegStyle::muted(),
@@ -332,12 +340,14 @@ pub fn decorate_line(
                         && !is_only_content_on_line(&line_range, &inline.range(), line_text)
                 })
             {
-                let width = range.end - range.start;
+                // плашка фиксированной ширины под миниатюру: подмена той же
+                // длины, что и синтаксис, оставляла бы дыру после картинки
                 push_plan(
                     &mut plans,
                     Some(range),
-                    Action::Replace(" ".repeat(width), SegStyle::muted()),
+                    Action::Replace(" ".repeat(IMAGE_CHIP_WIDTH), SegStyle::muted()),
                 );
+                has_image_chip = true;
                 continue;
             }
             let style = inline_style(inline);
@@ -371,6 +381,10 @@ pub fn decorate_line(
     }
 
     let pieces = materialize(line_range, line_text, plans, base_style);
+    // строки с inline-миниатюрами выше — картинка вписывается в строку
+    if has_image_chip {
+        height = height.max(IMAGE_LINE_HEIGHT);
+    }
     LineDecor {
         pieces,
         height,
@@ -702,13 +716,18 @@ mod tests {
 
     #[test]
     fn inline_image_embed_becomes_blanked_chip() {
-        // inline-картинка: синтаксис заменяется плашкой (миниатюру рисует
-        // рендер), текст вокруг сохраняется
+        // inline-картинка: синтаксис заменяется плашкой фиксированной ширины
+        // (миниатюру рисует рендер), текст вокруг сохраняется
         let text = "Картинка: ![[logo.png]] тут\n";
         let parsed = dunite_markdown::parse(text);
         let decor = decorate_line(&parsed, 0..27, "Картинка: ![[logo.png]] тут", &[]);
         let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
-        assert_eq!(visible, format!("Картинка: {} тут", " ".repeat(13)));
+        assert_eq!(
+            visible,
+            format!("Картинка: {} тут", " ".repeat(IMAGE_CHIP_WIDTH))
+        );
+        // строка с миниатюрой выше обычной — картинка вписывается в неё
+        assert_eq!(decor.height, IMAGE_LINE_HEIGHT);
     }
 
     #[test]
