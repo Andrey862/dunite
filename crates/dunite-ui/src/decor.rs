@@ -322,6 +322,24 @@ pub fn decorate_line(
             let Some(range) = intersect(&inline.range(), &line_range) else {
                 continue;
             };
+            // inline-картинки (не занимающие всю строку): синтаксис
+            // заменяется плашкой — поверх рисуется миниатюра (SPEC §8.2);
+            // в активном блоке синтаксис виден для редактирования
+            if !active
+                && is_image_embed(inline)
+                && embed_target_range(inline).is_some_and(|target| {
+                    looks_like_image(&slice_chars(line_text, &line_range, &target))
+                        && !is_only_content_on_line(&line_range, &inline.range(), line_text)
+                })
+            {
+                let width = range.end - range.start;
+                push_plan(
+                    &mut plans,
+                    Some(range),
+                    Action::Replace(" ".repeat(width), SegStyle::muted()),
+                );
+                continue;
+            }
             let style = inline_style(inline);
             if active {
                 push_plan(&mut plans, Some(range), Action::Keep(style));
@@ -439,6 +457,64 @@ fn inline_style(inline: &Inline) -> SegStyle {
         },
         Inline::BlockId { .. } => SegStyle::muted(),
     }
+}
+
+/// Embed-ссылка (встраивание): `![[...]]` / `![...](...)`.
+pub fn is_image_embed(inline: &Inline) -> bool {
+    matches!(
+        inline,
+        Inline::WikiLink { embed: true, .. } | Inline::MarkdownLink { image: true, .. }
+    )
+}
+
+/// Char-диапазон цели embed'а.
+pub fn embed_target_range(inline: &Inline) -> Option<Range<usize>> {
+    match inline {
+        Inline::WikiLink {
+            target,
+            embed: true,
+            ..
+        }
+        | Inline::MarkdownLink {
+            target,
+            image: true,
+            ..
+        } => Some(target.clone()),
+        _ => None,
+    }
+}
+
+/// По расширению — изображение ли это (для миниатюр и кэша).
+pub fn looks_like_image(target: &str) -> bool {
+    let lower = target.to_lowercase();
+    ["png", "jpg", "jpeg", "gif", "webp", "svg"]
+        .iter()
+        .any(|ext| lower.ends_with(&format!(".{ext}")))
+}
+
+/// Фрагмент строки по глобальному char-диапазону.
+fn slice_chars(line_text: &str, line_range: &Range<usize>, range: &Range<usize>) -> String {
+    let from = range.start.saturating_sub(line_range.start);
+    let to = range.end.clamp(range.start, line_range.end) - line_range.start;
+    line_text.chars().skip(from).take(to - from).collect()
+}
+
+/// Диапазон — единственное содержимое строки (кроме пробелов).
+fn is_only_content_on_line(
+    line_range: &Range<usize>,
+    range: &Range<usize>,
+    line_text: &str,
+) -> bool {
+    let blank = |span: Range<usize>| {
+        let from = span.start.saturating_sub(line_range.start);
+        let to = span.end.clamp(span.start, line_range.end) - line_range.start;
+        line_text
+            .chars()
+            .skip(from)
+            .take(to - from)
+            .all(|c| c.is_whitespace())
+    };
+    blank(line_range.start..range.start) && blank(range.end..line_range.end)
 }
 
 /// Собирает куски: сортирует планы, устраняет пересечения, заполняет пробелы.
@@ -622,6 +698,35 @@ mod tests {
         let decor = decorate_line(&parsed, 14..25, "# Заголовок", &[1]);
         let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(visible, "# Заголовок");
+    }
+
+    #[test]
+    fn inline_image_embed_becomes_blanked_chip() {
+        // inline-картинка: синтаксис заменяется плашкой (миниатюру рисует
+        // рендер), текст вокруг сохраняется
+        let text = "Картинка: ![[logo.png]] тут\n";
+        let parsed = dunite_markdown::parse(text);
+        let decor = decorate_line(&parsed, 0..27, "Картинка: ![[logo.png]] тут", &[]);
+        let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(visible, format!("Картинка: {} тут", " ".repeat(13)));
+    }
+
+    #[test]
+    fn standalone_image_keeps_chip_label() {
+        let text = "![[logo.png]]\n";
+        let parsed = dunite_markdown::parse(text);
+        let decor = decorate_line(&parsed, 0..13, "![[logo.png]]", &[]);
+        let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(visible, "logo.png");
+    }
+
+    #[test]
+    fn active_block_shows_raw_image_syntax() {
+        let text = "картинка ![[logo.png]]\n";
+        let parsed = dunite_markdown::parse(text);
+        let decor = decorate_line(&parsed, 0..23, "картинка ![[logo.png]]", &[0]);
+        let visible: String = decor.pieces.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(visible, "картинка ![[logo.png]]");
     }
 
     #[test]

@@ -37,6 +37,9 @@ pub struct RowGeom {
     pub height: Pixels,
     /// Char-диапазон содержимого строки в исходнике.
     pub line_chars: Range<usize>,
+    /// Inline-картинки строки: (char-диапазон embed, цель) — поверх плашки
+    /// рисуется миниатюра (SPEC §8.2).
+    pub inline_images: Vec<(Range<usize>, String)>,
     pub quads: Vec<QuadGeom>,
 }
 
@@ -211,12 +214,30 @@ impl Element for EditorElement {
                 .layout
                 .as_ref()
                 .map(|layout| {
-                    layout
+                    let mut targets: Vec<String> = layout
                         .images
                         .iter()
                         .map(|(_, target)| target.clone())
-                        .filter(|target| !workspace.images.contains_key(target))
-                        .collect()
+                        .collect();
+                    // inline-миниатюры тоже догружаем
+                    if let Some(tab) = workspace.tabs.get(workspace.active_tab) {
+                        let buffer = tab.editor.buffer();
+                        for block in &layout.parsed.blocks {
+                            for inline in &block.inlines {
+                                if let Some(target_range) = crate::decor::embed_target_range(inline)
+                                {
+                                    let target = buffer.slice(target_range);
+                                    if crate::decor::looks_like_image(&target) {
+                                        targets.push(target);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    targets.sort();
+                    targets.dedup();
+                    targets.retain(|target| !workspace.images.contains_key(target));
+                    targets
                 })
                 .unwrap_or_default();
             for target in missing {
@@ -389,6 +410,35 @@ impl Element for EditorElement {
                 ));
             }
 
+            // inline-миниатюры (SPEC §8.2): standalone-строки рисуются
+            // крупной картинкой ниже — их пропускаем
+            let mut inline_images = Vec::new();
+            for block in &layout.parsed.blocks {
+                if block.range.end <= content.start || block.range.start >= content.end {
+                    continue;
+                }
+                for inline in &block.inlines {
+                    if !crate::decor::is_image_embed(inline) {
+                        continue;
+                    }
+                    let range = inline.range();
+                    if range.start >= content.end || range.end <= content.start {
+                        continue;
+                    }
+                    let Some(target_range) = crate::decor::embed_target_range(inline) else {
+                        continue;
+                    };
+                    let target = buffer.slice(target_range);
+                    let standalone = layout
+                        .images
+                        .iter()
+                        .any(|(line, t)| *line == line_ix && *t == target);
+                    if crate::decor::looks_like_image(&target) && !standalone {
+                        inline_images.push((range, target));
+                    }
+                }
+            }
+
             let number = format!("{}", line_ix + 1);
             let gutter_run = TextRun {
                 len: number.len(),
@@ -412,6 +462,7 @@ impl Element for EditorElement {
                     y,
                     height,
                     line_chars: content,
+                    inline_images,
                     quads: Vec::new(),
                 },
                 gutter_shaped,
@@ -498,6 +549,43 @@ impl Element for EditorElement {
                         cx,
                     )
                     .ok();
+
+                // inline-миниатюры поверх плашки (SPEC §8.2)
+                for (range, target) in &row.geom.inline_images {
+                    let workspace = self.workspace.read(cx);
+                    let from = vis_byte_for(&row.geom.pieces, &row.geom.vis_text, range.start);
+                    let to = vis_byte_for(&row.geom.pieces, &row.geom.vis_text, range.end);
+                    let x = text_left + row.geom.shaped.x_for_index(from);
+                    let x_end = text_left + row.geom.shaped.x_for_index(to);
+                    let avail_w = ((x_end - x).to_f64() as f32).max(8.);
+                    let max_h = (row.geom.height.to_f64() as f32 - 4.).max(8.);
+                    if let Some(crate::workspace::ImageState::Loaded {
+                        render,
+                        width,
+                        height,
+                    }) = workspace.images.get(target)
+                    {
+                        let (image_w, image_h) =
+                            crate::images::fit_size(*width, *height, avail_w, max_h);
+                        let image_y =
+                            origin.y + px((row.geom.height.to_f64() as f32 - image_h) / 2.);
+                        window
+                            .paint_image(
+                                Bounds::new(point(x, image_y), size(px(image_w), px(image_h))),
+                                (px(0.)).into(),
+                                render.clone(),
+                                0,
+                                false,
+                            )
+                            .ok();
+                    } else {
+                        // плашка, пока изображение грузится
+                        window.paint_quad(fill(
+                            Bounds::new(point(x, origin.y + px(2.)), size(px(avail_w), px(max_h))),
+                            palette.hover,
+                        ));
+                    }
+                }
 
                 // standalone-картинки строк (SPEC §8.2)
                 if let Some(target) = image_targets.get(&row.geom.line_ix) {
