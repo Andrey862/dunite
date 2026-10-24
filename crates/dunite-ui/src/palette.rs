@@ -27,6 +27,8 @@ pub enum PaletteMode {
     Search,
     /// Переименование заметки (с переписыванием ссылок).
     Rename { note: NoteId },
+    /// Добавление git remote (url GitHub/GitLab/Bitbucket, SPEC §3).
+    AddRemote,
 }
 
 /// Результаты палитры.
@@ -345,6 +347,9 @@ impl Workspace {
             (PaletteMode::Rename { note }, _) => {
                 self.rename_note_to(&note, &state.query, cx);
             }
+            (PaletteMode::AddRemote, _) => {
+                self.add_remote(&state.query, cx);
+            }
             _ => {}
         }
         cx.notify();
@@ -476,6 +481,7 @@ impl Workspace {
             PaletteMode::QuickSwitcher => "Переход к заметке",
             PaletteMode::Search => "Поиск: слова, \"фраза\", tag:, path:, link: — Enter открыть",
             PaletteMode::Rename { .. } => "Переименование (ссылки будут обновлены)",
+            PaletteMode::AddRemote => "Git remote: url (github/gitlab/bitbucket) — Enter добавить",
         };
 
         let panel = div()
@@ -730,6 +736,7 @@ impl Workspace {
             match state.mode {
                 PaletteMode::Search => "Введите запрос — поиск идёт по мере ввода",
                 PaletteMode::QuickSwitcher => "Введите имя заметки",
+                PaletteMode::AddRemote => "Например: git@github.com:user/vault.git или https://…",
                 PaletteMode::Rename { .. } => return None,
             }
         } else {

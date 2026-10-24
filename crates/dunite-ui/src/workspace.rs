@@ -23,7 +23,7 @@ use crate::decor;
 use crate::editor_element::PaintState;
 use crate::editor_pane::ClickTracker;
 use crate::images;
-use crate::palette::PaletteState;
+use crate::palette::{PaletteMode, PaletteResults, PaletteState};
 use crate::theme::Palette;
 
 /// Состояние загрузки изображения (SPEC §7.5).
@@ -164,15 +164,23 @@ impl Workspace {
         }
     }
 
-    /// Запускает фоновые автоснапшоты git (SPEC §10.1).
+    /// Запускает фоновые автоснапшоты git (SPEC §10.1) и fetch счётчиков.
     pub fn spawn_git_scheduler(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
+            let mut last_fetch = std::time::Instant::now();
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(5))
                     .await;
                 this.update(cx, |workspace, cx| workspace.maybe_snapshot(cx))
                     .ok();
+                // fetch раз в минуту — свежие ↑↓ для статус-бара (сетевой,
+                // поэтому редко и в фоне)
+                if last_fetch.elapsed().as_secs() >= 60 {
+                    last_fetch = std::time::Instant::now();
+                    this.update(cx, |workspace, cx| workspace.git_fetch_in_background(cx))
+                        .ok();
+                }
             }
         })
         .detach();
@@ -238,6 +246,124 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Push в remote (сетевая операция — в фоне, SPEC §10.1).
+    pub(crate) fn git_push(&mut self, cx: &mut Context<Self>) {
+        let Some(git) = self.git.as_ref() else {
+            self.status_message = "git: репозиторий не найден (Ctrl+G)".to_string();
+            cx.notify();
+            return;
+        };
+        let args = git.push_args();
+        let root = git.root().to_path_buf();
+        self.status_message = "git: push…".to_string();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { dunite_git::run_cli(&root, &args) })
+                .await;
+            this.update(cx, |workspace, cx| {
+                workspace.status_message = match result {
+                    Ok(output) if output.is_empty() => "git: push завершён".to_string(),
+                    Ok(output) => format!("git: {output}"),
+                    Err(err) => format!("git: push: {err}"),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Pull из remote: только fast-forward, без мержей (SPEC §14).
+    pub(crate) fn git_pull(&mut self, cx: &mut Context<Self>) {
+        let Some(git) = self.git.as_ref() else {
+            self.status_message = "git: репозиторий не найден (Ctrl+G)".to_string();
+            cx.notify();
+            return;
+        };
+        let args = git.pull_args();
+        let root = git.root().to_path_buf();
+        self.status_message = "git: pull…".to_string();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { dunite_git::run_cli(&root, &args) })
+                .await;
+            this.update(cx, |workspace, cx| {
+                match result {
+                    Ok(_output) => {
+                        workspace.reload_all_tabs();
+                        workspace.status_message = "git: pull завершён (fast-forward)".to_string();
+                    }
+                    Err(err) => {
+                        workspace.status_message =
+                            format!("git: pull: {err} — истории разошлись? разрешите вручную");
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Фоновый fetch: обновляет счётчики ↑↓ (раз в минуту из планировщика).
+    pub(crate) fn git_fetch_in_background(&mut self, cx: &mut Context<Self>) {
+        let Some(git) = self.git.as_ref() else {
+            return;
+        };
+        let args = git.fetch_args();
+        let root = git.root().to_path_buf();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = dunite_git::run_cli(&root, &args);
+                })
+                .await;
+            this.update(cx, |_workspace, cx| cx.notify()).ok();
+        })
+        .detach();
+    }
+
+    /// Палитра добавления remote (кнопка «+ remote»).
+    pub(crate) fn open_remote_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_state = Some(PaletteState::new(
+            PaletteMode::AddRemote,
+            String::new(),
+            PaletteResults::Notes(Vec::new()),
+        ));
+        self.palette_focus.focus(window);
+        cx.notify();
+    }
+
+    /// Добавляет remote (имя — `origin`, первый по списку).
+    pub(crate) fn add_remote(&mut self, url: &str, cx: &mut Context<Self>) {
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            self.status_message = "git: пустой URL remote".to_string();
+            cx.notify();
+            return;
+        }
+        match self.git.as_ref() {
+            Some(git) => match git.add_remote("origin", &url) {
+                Ok(()) => {
+                    self.status_message =
+                        "git: remote origin добавлен — push запомнит upstream".to_string();
+                    self.git_fetch_in_background(cx);
+                }
+                Err(err) => {
+                    self.status_message = format!("git: {err}");
+                }
+            },
+            None => {
+                self.status_message = "git: репозиторий не найден (Ctrl+G)".to_string();
+            }
+        }
+        cx.notify();
+    }
+
     /// Строка git-состояния для статус-бара (SPEC §9.5).
     pub(crate) fn git_status_text(&self) -> String {
         let Some(git) = self.git.as_ref() else {
@@ -249,10 +375,14 @@ impl Workspace {
             .as_deref()
             .map(|time| format!(" · снапшот {time}"))
             .unwrap_or_default();
+        let remote = git
+            .remote_status()
+            .map(|status| format!(" · {status}"))
+            .unwrap_or_default();
         if changes == 0 {
-            format!("git: чисто{snapshot}")
+            format!("git: чисто{snapshot}{remote}")
         } else {
-            format!("git: изменённых файлов: {changes}{snapshot}")
+            format!("git: изменённых файлов: {changes}{snapshot}{remote}")
         }
     }
 

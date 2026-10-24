@@ -281,6 +281,63 @@ impl Workspace {
 
     // ── история git (SPEC §10.2) ────────────────────────────────────────
 
+    /// Полоса remote: статус синхронизации и кнопки pull/push (SPEC §10.1).
+    fn render_remote_strip(&self, cx: &Context<Self>) -> impl IntoElement {
+        let status = self.git.as_ref().and_then(|git| git.remote_status());
+        let mut actions = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(self.git_button("git-pull", "pull", GitAction::Pull, cx))
+            .child(self.git_button("git-push", "push", GitAction::Push, cx));
+        if status.is_none() {
+            actions = actions.child(self.git_button(
+                "git-add-remote",
+                "+ remote",
+                GitAction::AddRemote,
+                cx,
+            ));
+        }
+
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .py_1()
+            .border_b_1()
+            .border_color(self.palette.border)
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(self.palette.text_muted)
+                    .truncate()
+                    .child(status.unwrap_or_else(|| "remote не настроен".to_string())),
+            )
+            .child(actions)
+    }
+
+    fn git_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        action: GitAction,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .px_1p5()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|style| style.bg(self.palette.hover))
+            .on_click(cx.listener(move |this, _event, window, cx| match action {
+                GitAction::Pull => this.git_pull(cx),
+                GitAction::Push => this.git_push(cx),
+                GitAction::AddRemote => this.open_remote_setup(window, cx),
+            }))
+            .child(div().text_size(px(10.)).child(label))
+    }
+
     /// История git: коммиты, diff-превью, восстановление заметки.
     fn render_git_history(&self, cx: &Context<Self>) -> impl IntoElement {
         let log = self.git_log();
@@ -347,6 +404,7 @@ impl Workspace {
                             ),
                     ),
             )
+            .child(self.render_remote_strip(cx))
             .child(
                 div()
                     .id("git-history")
@@ -443,4 +501,12 @@ impl Workspace {
                     })),
             )
     }
+}
+
+/// Действия кнопок remote-полосы.
+#[derive(Clone, Copy)]
+enum GitAction {
+    Pull,
+    Push,
+    AddRemote,
 }

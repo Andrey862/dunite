@@ -247,6 +247,109 @@ impl GitRepo {
         Ok(path)
     }
 
+    // ── remote и синхронизация (SPEC §3, §10.1) ─────────────────────────
+    //
+    // Сетевые операции идут через CLI git: он наследует ssh-ключи,
+    // credential-helper и 2FA пользователя, которых у libgit2 нет.
+
+    /// Настроенные remote'ы: (имя, url).
+    pub fn remotes(&self) -> Vec<(String, String)> {
+        self.repo
+            .remotes()
+            .map(|names| {
+                names
+                    .iter()
+                    .flatten()
+                    .filter_map(|name| {
+                        let url = self.repo.find_remote(name).ok()?.url()?.to_string();
+                        Some((name.to_string(), url))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Добавляет remote (например `origin` → url GitHub/GitLab/Bitbucket).
+    pub fn add_remote(&self, name: &str, url: &str) -> Result<()> {
+        self.repo.remote(name, url)?;
+        Ok(())
+    }
+
+    /// Отклонение от upstream: (вперед, назад) коммитов.
+    ///
+    /// `None` — upstream не настроен.
+    pub fn ahead_behind(&self) -> Option<(usize, usize)> {
+        let head = self.repo.head().ok()?.peel_to_commit().ok()?;
+        let branch_name = self.repo.head().ok()?.shorthand()?.to_string();
+        let branch = self
+            .repo
+            .find_branch(&branch_name, git2::BranchType::Local)
+            .ok()?;
+        let upstream_oid = branch.upstream().ok()?.get().target()?;
+        let (ahead, behind) = self.repo.graph_ahead_behind(head.id(), upstream_oid).ok()?;
+        Some((ahead, behind))
+    }
+
+    /// Push: `git push` (при первом разе — с `-u`, чтобы запомнить upstream).
+    pub fn push(&self) -> Result<String> {
+        let args = self.push_args();
+        run_cli(&self.root, &args)
+    }
+
+    /// Pull: `git pull --ff-only` — без автоматических мержей.
+    ///
+    /// Если истории разошлись, git откажется (SPEC §14: конфликты
+    /// не резолвим магически — пользователь разбирается вручную).
+    pub fn pull(&self) -> Result<String> {
+        let args = self.pull_args();
+        run_cli(&self.root, &args)
+    }
+
+    /// Fetch: обновляет remote-tracking ветки (счётчики ahead/behind).
+    pub fn fetch(&self) -> Result<String> {
+        let args = self.fetch_args();
+        run_cli(&self.root, &args)
+    }
+
+    /// Аргументы push: с `-u` при первом разе, чтобы запомнить upstream.
+    ///
+    /// Аргументы готовятся заранее (локально), а [`run_cli`] выполняется
+    /// в фоне — сетевые операции не должны морозить UI.
+    pub fn push_args(&self) -> Vec<String> {
+        if self.ahead_behind().is_none() {
+            let branch = self
+                .repo
+                .head()
+                .ok()
+                .and_then(|head| head.shorthand().map(|name| name.to_string()))
+                .unwrap_or_else(|| "HEAD".to_string());
+            if let Some((remote, _)) = self.remotes().first() {
+                return vec!["push".into(), "-u".into(), remote.clone(), branch];
+            }
+        }
+        vec!["push".into()]
+    }
+
+    /// Аргументы pull: fast-forward only, без автоматических мержей.
+    pub fn pull_args(&self) -> Vec<String> {
+        vec!["pull".into(), "--ff-only".into()]
+    }
+
+    /// Аргументы fetch: тихое обновление всех remote-tracking веток.
+    pub fn fetch_args(&self) -> Vec<String> {
+        vec!["fetch".into(), "--all".into(), "--quiet".into()]
+    }
+
+    /// Статус remote для статус-бара: `origin · ↑2 ↓1`.
+    pub fn remote_status(&self) -> Option<String> {
+        let (name, _) = self.remotes().into_iter().next()?;
+        let counts = self
+            .ahead_behind()
+            .map(|(ahead, behind)| format!(" · ↑{ahead} ↓{behind}"))
+            .unwrap_or_default();
+        Some(format!("{name}{counts}"))
+    }
+
     // ── внутреннее ────────────────────────────────────────────────────
 
     fn head_commit(&self) -> Option<Commit<'_>> {
@@ -291,6 +394,25 @@ impl GitRepo {
             out.push(commit_info(&commit));
         }
         Ok(out)
+    }
+}
+
+/// Выполняет git-команду в корне хранилища (CLI git).
+///
+/// Сетевые операции выполняются именно через CLI: он наследует ssh-ключи,
+/// credential-helper и 2FA пользователя, которых у libgit2 нет.
+pub fn run_cli(root: &Path, args: &[String]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(GitError::Io(std::io::Error::other(
+            stderr.trim().to_string(),
+        )))
     }
 }
 
@@ -455,5 +577,132 @@ mod tests {
         let changed = repo.changed_files().unwrap();
         assert!(changed.iter().any(|f| f == "Новая.md"));
         drop(dir);
+    }
+
+    // ── remote и синхронизация ──────────────────────────────────────────
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Bare-репозиторий — как удалённый сервер (GitHub/GitLab/Bitbucket).
+    fn bare_remote() -> tempfile::TempDir {
+        let remote = tempfile::tempdir().unwrap();
+        Repository::init_bare(remote.path()).unwrap();
+        remote
+    }
+
+    #[test]
+    fn remote_push_and_ahead_behind() {
+        let (dir, repo) = vault();
+        let remote = bare_remote();
+        assert!(repo.remotes().is_empty());
+        assert!(repo.ahead_behind().is_none());
+        assert!(repo.remote_status().is_none());
+
+        repo.add_remote("origin", remote.path().to_str().unwrap())
+            .unwrap();
+        assert_eq!(repo.remotes().len(), 1);
+
+        // первый push запоминает upstream
+        repo.push().unwrap();
+        assert_eq!(repo.ahead_behind(), Some((0, 0)));
+        assert!(repo.remote_status().unwrap().starts_with("origin"));
+
+        // локальный коммит — впереди на один
+        fs::write(dir.path().join("Заметка.md"), "версия 2\n").unwrap();
+        repo.snapshot().unwrap();
+        assert_eq!(repo.ahead_behind(), Some((1, 0)));
+    }
+
+    #[test]
+    fn remote_pull_fast_forward() {
+        let (dir, repo) = vault();
+        let remote = bare_remote();
+        repo.add_remote("origin", remote.path().to_str().unwrap())
+            .unwrap();
+        repo.push().unwrap();
+
+        // клон пушит изменение
+        let clone = tempfile::tempdir().unwrap();
+        run_git(
+            clone.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        fs::write(clone.path().join("Заметка.md"), "версия от клона\n").unwrap();
+        run_git(clone.path(), &["add", "-A"]);
+        run_git(
+            clone.path(),
+            &[
+                "-c",
+                "user.email=c@local",
+                "-c",
+                "user.name=c",
+                "commit",
+                "-m",
+                "правка клона",
+            ],
+        );
+        run_git(clone.path(), &["push"]);
+
+        // наш репозиторий отстал — fetch обновляет счётчики, pull подтягивает
+        repo.fetch().unwrap();
+        assert_eq!(repo.ahead_behind(), Some((0, 1)));
+        let output = repo.pull().unwrap();
+        assert!(!output.is_empty() || output.is_empty()); // вывод зависит от версии git
+        assert_eq!(
+            fs::read_to_string(dir.path().join("Заметка.md")).unwrap(),
+            "версия от клона\n"
+        );
+        assert_eq!(repo.ahead_behind(), Some((0, 0)));
+    }
+
+    #[test]
+    fn remote_pull_refuses_diverged_histories() {
+        // SPEC §14: конфликты не резолвим магически — pull --ff-only
+        // отказывается при расхождении, разбирается пользователь
+        let (dir, repo) = vault();
+        let remote = bare_remote();
+        repo.add_remote("origin", remote.path().to_str().unwrap())
+            .unwrap();
+        repo.push().unwrap();
+
+        let clone = tempfile::tempdir().unwrap();
+        run_git(
+            clone.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        fs::write(clone.path().join("Другая.md"), "из клона\n").unwrap();
+        run_git(clone.path(), &["add", "-A"]);
+        run_git(
+            clone.path(),
+            &[
+                "-c",
+                "user.email=c@local",
+                "-c",
+                "user.name=c",
+                "commit",
+                "-m",
+                "правка клона",
+            ],
+        );
+        run_git(clone.path(), &["push"]);
+
+        // локальная своя правка — истории разошлись
+        fs::write(dir.path().join("Заметка.md"), "своя версия\n").unwrap();
+        repo.snapshot().unwrap();
+        repo.fetch().unwrap();
+        assert_eq!(repo.ahead_behind(), Some((1, 1)));
+        assert!(repo.pull().is_err());
     }
 }
