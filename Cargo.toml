@@ -51,7 +51,9 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 notify = "8"
-git2 = "0.20"
+# без https/ssh: бэкапы только локальные, OpenSSL не нужен
+git2 = { version = "0.20", default-features = false }
+chrono = "0.4"
 tantivy = "0.24"
 image = "0.25"
 nucleo-matcher = "0.3"
