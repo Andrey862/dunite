@@ -1552,6 +1552,7 @@ name = "dunite-ui"
 version = "0.1.0"
 dependencies = [
  "dunite-editor",
+ "dunite-git",
  "dunite-index",
  "dunite-markdown",
  "dunite-settings",

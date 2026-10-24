@@ -560,6 +560,7 @@ impl Workspace {
     /// Вызвать после любой правки: перерисовка + отложенный автосейв.
     pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
         self.save_generation += 1;
+        self.last_edit = Some(std::time::Instant::now());
         let generation = self.save_generation;
         self.scroll_cursor_into_view();
 
@@ -630,17 +631,12 @@ impl Workspace {
         }
     }
 
-    /// Ctrl+S: записать свою версию поверх внешних изменений (SPEC §14).
-    pub(crate) fn force_save_active(&mut self, cx: &mut Context<Self>) {
-        let ix = self.active_tab;
-        if self.tabs.get(ix).is_some_and(|tab| tab.conflict) {
-            self.save_tab_now(ix);
-            self.status_message = "своя версия записана поверх внешних изменений".to_string();
-        } else {
-            self.save_tab_now(ix);
-            self.status_message = "сохранено".to_string();
-        }
-        cx.notify();
+    /// Ctrl+S: сохранить всё и сделать git-снапшот сейчас (SPEC §10.1).
+    ///
+    /// При конфликте внешних правок — записывает свою версию поверх (§14).
+    pub(crate) fn save_and_snapshot(&mut self, cx: &mut Context<Self>) {
+        self.save_all();
+        self.snapshot_now("Ctrl+S", cx);
     }
 
     /// F5: перечитать заметку с диска, отбросив правки буфера (SPEC §14).

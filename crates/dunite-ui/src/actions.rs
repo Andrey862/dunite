@@ -59,9 +59,12 @@ actions!(
         // навигация back/forward (SPEC §8.3)
         NavBack,
         NavForward,
-        // конфликт внешних правок (SPEC §14)
+        // внешние правки (SPEC §14)
         SaveNote,
         ReloadNote,
+        // git-бэкапы (SPEC §10)
+        InitGit,
+        ToggleGitScope,
     ]
 );
 

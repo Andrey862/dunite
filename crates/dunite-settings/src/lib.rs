@@ -31,6 +31,9 @@ pub struct Settings {
     pub theme: Theme,
     /// Недавно открытые хранилища (последнее — первым, максимум [`Settings::MAX_RECENT`]).
     pub recent_vaults: Vec<PathBuf>,
+    /// Задержка автоснапшота git после последнего изменения, сек.
+    /// `0` — автоснапшоты выключены (SPEC §10.1).
+    pub snapshot_debounce_secs: u64,
 }
 
 impl Default for Settings {
@@ -38,6 +41,7 @@ impl Default for Settings {
         Self {
             theme: Theme::default(),
             recent_vaults: Vec::new(),
+            snapshot_debounce_secs: 60,
         }
     }
 }

@@ -43,6 +43,7 @@ impl Workspace {
                 self.vault.note_count(),
                 self.settings.theme.name()
             ))
+            .child(self.git_status_text())
             .child(note_label)
             .child(cursor_label)
             .child(self.status_message.clone())

@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use dunite_editor::Editor;
+use dunite_git::{CommitInfo, DiffLine, GitRepo};
 use dunite_index::LinkGraph;
 use dunite_markdown::ParsedNote;
 use dunite_settings::Settings;
@@ -15,8 +16,8 @@ use dunite_vault::{NoteId, Vault};
 use gpui::{Context, FocusHandle, FontWeight, Render, RenderImage, Window, div, prelude::*, px};
 
 use crate::actions::{
-    CloseTab, NavBack, NavForward, NextTab, OpenSearch, OpenSwitcher, PrevTab, Quit, ReloadNote,
-    RenameNote, SaveNote,
+    CloseTab, InitGit, NavBack, NavForward, NextTab, OpenSearch, OpenSwitcher, PrevTab, Quit,
+    ReloadNote, RenameNote, SaveNote,
 };
 use crate::decor;
 use crate::editor_element::PaintState;
@@ -87,6 +88,18 @@ pub struct Workspace {
     pub(crate) nav_forward: Vec<(NoteId, usize)>,
     /// Наблюдатель за внешними изменениями файлов (SPEC §11).
     pub(crate) watcher: Option<VaultWatcher>,
+    /// Git-репозиторий хранилища (SPEC §10).
+    pub(crate) git: Option<GitRepo>,
+    /// Последнее изменение — для автоснапшота.
+    pub(crate) last_edit: Option<std::time::Instant>,
+    /// Время последнего снапшота — для статус-бара.
+    pub(crate) last_snapshot: Option<String>,
+    /// Область timeline: заметка или всё хранилище.
+    pub(crate) git_scope_note: bool,
+    /// Раскрытый коммит в timeline (diff-превью).
+    pub(crate) git_expanded: Option<String>,
+    /// Diff-строки раскрытого коммита.
+    pub(crate) git_diff: Vec<DiffLine>,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active_tab: usize,
     pub(crate) status_message: String,
@@ -118,6 +131,7 @@ impl Workspace {
         // полный разбор хранилища при открытии; для больших vault'ов
         // позже уедет в фон (сейчас это миллисекунды)
         let graph = LinkGraph::build(&vault);
+        let git = GitRepo::open(vault.root()).ok().flatten();
         Self {
             vault,
             graph,
@@ -140,8 +154,171 @@ impl Workspace {
             nav_back: Vec::new(),
             nav_forward: Vec::new(),
             watcher: None,
+            git,
+            last_edit: None,
+            last_snapshot: None,
+            git_scope_note: true,
+            git_expanded: None,
+            git_diff: Vec::new(),
             save_generation: 0,
         }
+    }
+
+    /// Запускает фоновые автоснапшоты git (SPEC §10.1).
+    pub fn spawn_git_scheduler(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(5))
+                    .await;
+                this.update(cx, |workspace, cx| workspace.maybe_snapshot(cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Автоснапшот: когда после последнего изменения прошла задержка
+    /// и есть что коммитить.
+    pub(crate) fn maybe_snapshot(&mut self, cx: &mut Context<Self>) {
+        let debounce = self.settings.snapshot_debounce_secs;
+        if debounce == 0 || self.git.is_none() {
+            return;
+        }
+        let quiet = self
+            .last_edit
+            .is_some_and(|last| last.elapsed().as_secs() >= debounce);
+        if !quiet {
+            return;
+        }
+        self.snapshot_now("автоснапшот", cx);
+    }
+
+    /// Снапшот сейчас; `reason` — для статус-сообщения.
+    pub(crate) fn snapshot_now(&mut self, reason: &str, cx: &mut Context<Self>) {
+        let Some(git) = self.git.as_ref() else {
+            self.status_message = "git-репозиторий не найден (Ctrl+G — создать)".to_string();
+            cx.notify();
+            return;
+        };
+        match git.snapshot() {
+            Ok(Some(_)) => {
+                self.last_snapshot = Some(dunite_git::now_local());
+                self.status_message = format!("git: снапшот создан ({reason})");
+                self.git_expanded = None;
+                self.git_diff.clear();
+            }
+            Ok(None) => {
+                self.status_message = "git: нет изменений для снапшота".to_string();
+            }
+            Err(err) => {
+                self.status_message = format!("git: ошибка снапшота: {err}");
+            }
+        }
+        cx.notify();
+    }
+
+    /// Ctrl+G: git init для хранилища без репозитория (SPEC §10.1).
+    pub(crate) fn git_init(&mut self, cx: &mut Context<Self>) {
+        if self.git.is_some() {
+            self.status_message = "git: репозиторий уже есть".to_string();
+            cx.notify();
+            return;
+        }
+        match GitRepo::init(self.vault.root()) {
+            Ok(repo) => {
+                self.git = Some(repo);
+                self.last_snapshot = Some(dunite_git::now_local());
+                self.status_message = "git: хранилище под контролем версий".to_string();
+            }
+            Err(err) => {
+                self.status_message = format!("git init не удался: {err}");
+            }
+        }
+        cx.notify();
+    }
+
+    /// Строка git-состояния для статус-бара (SPEC §9.5).
+    pub(crate) fn git_status_text(&self) -> String {
+        let Some(git) = self.git.as_ref() else {
+            return "git: нет репозитория (Ctrl+G)".to_string();
+        };
+        let changes = git.changed_files().map(|files| files.len()).unwrap_or(0);
+        let snapshot = self
+            .last_snapshot
+            .as_deref()
+            .map(|time| format!(" · снапшот {time}"))
+            .unwrap_or_default();
+        if changes == 0 {
+            format!("git: чисто{snapshot}")
+        } else {
+            format!("git: изменённых файлов: {changes}{snapshot}")
+        }
+    }
+
+    /// Timeline коммитов (SPEC §10.2).
+    pub(crate) fn git_log(&self) -> Vec<CommitInfo> {
+        let Some(git) = self.git.as_ref() else {
+            return Vec::new();
+        };
+        if self.git_scope_note {
+            match self.tabs.get(self.active_tab) {
+                Some(tab) => git
+                    .log_for_path(tab.note_id.as_str(), 50)
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            }
+        } else {
+            git.log(50).unwrap_or_default()
+        }
+    }
+
+    /// Раскрыть/свернуть diff-превью коммита.
+    pub(crate) fn toggle_git_diff(&mut self, commit_id: &str, cx: &mut Context<Self>) {
+        if self.git_expanded.as_deref() == Some(commit_id) {
+            self.git_expanded = None;
+            self.git_diff.clear();
+            cx.notify();
+            return;
+        }
+        let Some(git) = self.git.as_ref() else {
+            return;
+        };
+        let rel_path = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| tab.note_id.as_str().to_string());
+        self.git_diff = rel_path
+            .and_then(|path| git.diff_note(commit_id, &path).ok())
+            .unwrap_or_default();
+        self.git_expanded = Some(commit_id.to_string());
+        cx.notify();
+    }
+
+    /// Восстановить заметку из коммита (SPEC §10.2: всегда новый коммит).
+    pub(crate) fn restore_from_commit(&mut self, commit_id: &str, cx: &mut Context<Self>) {
+        let Some(rel_path) = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| tab.note_id.as_str().to_string())
+        else {
+            return;
+        };
+        let Some(git) = self.git.as_ref() else {
+            return;
+        };
+        match git.restore_note(commit_id, &rel_path) {
+            Ok(_) => {
+                self.save_generation += 1;
+                self.reload_all_tabs();
+                self.snapshot_now("восстановление из истории", cx);
+                self.status_message = format!("git: {rel_path} восстановлена из истории");
+            }
+            Err(err) => {
+                self.status_message = format!("git: восстановление не удалось: {err}");
+            }
+        }
+        cx.notify();
     }
 
     /// Запускает фоновое наблюдение за внешними изменениями файлов.
@@ -526,9 +703,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CloseTab, _window, cx| this.close_active_tab(cx)))
             .on_action(cx.listener(|this, _: &NextTab, _window, cx| this.activate_next_tab(cx)))
             .on_action(cx.listener(|this, _: &PrevTab, _window, cx| this.activate_prev_tab(cx)))
-            .on_action(cx.listener(|this, _: &Quit, window, _cx| {
-                // все несохранённые вкладки пишем на диск (SPEC §10.3)
+            .on_action(cx.listener(|this, _: &Quit, window, cx| {
+                // все несохранённые вкладки пишем на диск и фиксируем
+                // последний снапшот (SPEC §10.3)
                 this.save_all();
+                this.snapshot_now("выход", cx);
                 window.remove_window();
             }))
             .on_action(
@@ -538,8 +717,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &RenameNote, window, cx| this.open_rename(window, cx)))
             .on_action(cx.listener(|this, _: &NavBack, _, cx| this.navigate_back(cx)))
             .on_action(cx.listener(|this, _: &NavForward, _, cx| this.navigate_forward(cx)))
-            .on_action(cx.listener(|this, _: &SaveNote, _, cx| this.force_save_active(cx)))
+            .on_action(cx.listener(|this, _: &SaveNote, _, cx| this.save_and_snapshot(cx)))
             .on_action(cx.listener(|this, _: &ReloadNote, _, cx| this.reload_active_tab(cx)))
+            .on_action(cx.listener(|this, _: &InitGit, _, cx| this.git_init(cx)))
             .size_full()
             .flex()
             .flex_col()

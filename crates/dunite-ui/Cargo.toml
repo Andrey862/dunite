@@ -11,6 +11,7 @@ image.workspace = true
 open.workspace = true
 tracing.workspace = true
 dunite-editor.workspace = true
+dunite-git.workspace = true
 dunite-index.workspace = true
 dunite-markdown.workspace = true
 dunite-settings.workspace = true

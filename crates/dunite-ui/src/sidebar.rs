@@ -17,6 +17,7 @@ impl Workspace {
             .child(self.render_outline(cx))
             .child(self.render_backlinks(cx))
             .child(self.render_tags(cx))
+            .child(self.render_git_history(cx))
     }
 
     /// Заголовок секции.
@@ -276,5 +277,170 @@ impl Workspace {
             self.expanded_tags.insert(tag.to_string());
         }
         cx.notify();
+    }
+
+    // ── история git (SPEC §10.2) ────────────────────────────────────────
+
+    /// История git: коммиты, diff-превью, восстановление заметки.
+    fn render_git_history(&self, cx: &Context<Self>) -> impl IntoElement {
+        let log = self.git_log();
+        let expanded = self.git_expanded.clone();
+
+        let scope_chip = |label: &'static str, active: bool, scope_note: bool| {
+            div()
+                .id(gpui::SharedString::from(format!("git-scope-{label}")))
+                .px_1p5()
+                .rounded_md()
+                .cursor_pointer()
+                .bg(if active {
+                    self.palette.hover
+                } else {
+                    self.palette.panel
+                })
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.git_scope_note = scope_note;
+                    this.git_expanded = None;
+                    this.git_diff.clear();
+                    cx.notify();
+                }))
+                .child(div().text_size(px(10.)).child(label))
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_b_1()
+                    .border_color(self.palette.border)
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(self.palette.text_muted)
+                            .child("История (git)"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(scope_chip("Заметка", self.git_scope_note, true))
+                            .child(scope_chip("Всё", !self.git_scope_note, false))
+                            .child(
+                                div()
+                                    .id("git-snapshot-now")
+                                    .px_1p5()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(self.palette.hover))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.save_and_snapshot(cx);
+                                    }))
+                                    .child(div().text_size(px(10.)).child("снапшот")),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id("git-history")
+                    .flex()
+                    .flex_col()
+                    .max_h(px(300.))
+                    .overflow_y_scroll()
+                    .children(log.into_iter().map(|commit| {
+                        let is_open = expanded.as_deref() == Some(commit.id.as_str());
+                        let commit_id = commit.id.clone();
+                        let mut node = div().flex().flex_col().child(
+                            div()
+                                .id(gpui::SharedString::from(format!(
+                                    "git-commit:{}",
+                                    commit.id
+                                )))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .px_3()
+                                .py_1()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(self.palette.hover))
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.toggle_git_diff(&commit_id, cx);
+                                }))
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(self.palette.accent)
+                                        .child(commit.short_id.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(self.palette.text_muted)
+                                        .child(commit.time.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .truncate()
+                                        .child(commit.summary.clone()),
+                                ),
+                        );
+                        if is_open {
+                            node = node.child(
+                                div()
+                                    .px_3()
+                                    .pb_2()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .children(self.git_diff.iter().map(|line| {
+                                        let (color, prefix) = match line.origin {
+                                            '+' => (self.palette.accent, "+"),
+                                            '-' => (self.palette.text_muted, "-"),
+                                            _ => (self.palette.text_muted, " "),
+                                        };
+                                        div()
+                                            .flex()
+                                            .gap_1()
+                                            .text_size(px(10.))
+                                            .font_family("monospace")
+                                            .text_color(color)
+                                            .child(prefix)
+                                            .child(line.text.clone())
+                                    }))
+                                    .child(
+                                        div()
+                                            .id("git-restore")
+                                            .mt_1()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(self.palette.border)
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(self.palette.hover))
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                if let Some(commit) = this.git_expanded.clone() {
+                                                    this.restore_from_commit(&commit, cx);
+                                                }
+                                            }))
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.))
+                                                    .child("восстановить заметку"),
+                                            ),
+                                    ),
+                            );
+                        }
+                        node
+                    })),
+            )
     }
 }

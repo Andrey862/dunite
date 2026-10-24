@@ -249,14 +249,14 @@ impl GitRepo {
 
     // ── внутреннее ────────────────────────────────────────────────────
 
-    fn head_commit(&self) -> Option<Commit> {
+    fn head_commit(&self) -> Option<Commit<'_>> {
         self.repo
             .head()
             .ok()
             .and_then(|head| head.peel_to_commit().ok())
     }
 
-    fn find_commit(&self, commit_id: &str) -> Result<Commit> {
+    fn find_commit(&self, commit_id: &str) -> Result<Commit<'_>> {
         let oid = Oid::from_str(commit_id)?;
         Ok(self.repo.find_commit(oid)?)
     }
@@ -307,7 +307,7 @@ fn commit_info(commit: &Commit) -> CommitInfo {
 }
 
 /// Локальное время `YYYY-MM-DD HH:MM`.
-fn now_local() -> String {
+pub fn now_local() -> String {
     let now = chrono::Local::now();
     now.format("%Y-%m-%d %H:%M").to_string()
 }
