@@ -25,10 +25,26 @@ pub enum PaletteMode {
     QuickSwitcher,
     /// Полнотекстовый поиск (SPEC §11).
     Search,
-    /// Переименование заметки (с переписыванием ссылок).
+    /// Переименование заметки активной вкладки (F2).
     Rename { note: NoteId },
     /// Добавление git remote (url GitHub/GitLab/Bitbucket, SPEC §3).
     AddRemote,
+    /// Новая заметка в папке (SPEC §9.1).
+    CreateNote { dir: String },
+    /// Новая папка.
+    CreateFolder { dir: String },
+    /// Переименование файла/папки/вложения из дерева.
+    RenameEntry { path: String },
+    /// Перемещение файла/папки в папку из дерева.
+    MoveEntry { path: String },
+}
+
+/// Намерение открыть палитру с предзаполненным запросом.
+pub enum PaletteIntent {
+    CreateNote { dir: String },
+    CreateFolder { dir: String },
+    RenameEntry { path: String },
+    MoveEntry { path: String },
 }
 
 /// Результаты палитры.
@@ -37,6 +53,8 @@ pub enum PaletteResults {
     Notes(Vec<NoteId>),
     /// Результаты поиска со сниппетами.
     Hits(Vec<SearchHit>),
+    /// Папки (выбор назначения при перемещении).
+    Folders(Vec<String>),
 }
 
 impl PaletteResults {
@@ -44,6 +62,7 @@ impl PaletteResults {
         match self {
             PaletteResults::Notes(ids) => ids.len(),
             PaletteResults::Hits(hits) => hits.len(),
+            PaletteResults::Folders(folders) => folders.len(),
         }
     }
 
@@ -186,6 +205,46 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Открывает палитру по намерению (создание/переименование/перемещение).
+    pub(crate) fn open_palette(
+        &mut self,
+        intent: PaletteIntent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (mode, query, results) = match intent {
+            PaletteIntent::CreateNote { dir } => (
+                PaletteMode::CreateNote { dir },
+                String::new(),
+                PaletteResults::Notes(Vec::new()),
+            ),
+            PaletteIntent::CreateFolder { dir } => (
+                PaletteMode::CreateFolder { dir },
+                String::new(),
+                PaletteResults::Notes(Vec::new()),
+            ),
+            PaletteIntent::RenameEntry { path } => {
+                let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                (
+                    PaletteMode::RenameEntry { path },
+                    name,
+                    PaletteResults::Notes(Vec::new()),
+                )
+            }
+            PaletteIntent::MoveEntry { path } => {
+                let folders = self.vault.folders();
+                (
+                    PaletteMode::MoveEntry { path },
+                    String::new(),
+                    PaletteResults::Folders(folders),
+                )
+            }
+        };
+        self.palette_state = Some(PaletteState::new(mode, query, results));
+        self.palette_focus.focus(window);
+        cx.notify();
+    }
+
     pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette_state.take().is_some() {
             self.focus_handle.focus(window);
@@ -294,10 +353,13 @@ impl Workspace {
         let query = state.query.clone();
         let is_search = matches!(state.mode, PaletteMode::Search);
         let is_switcher = matches!(state.mode, PaletteMode::QuickSwitcher);
+        let is_move = matches!(state.mode, PaletteMode::MoveEntry { .. });
         let results = if is_search {
             PaletteResults::Hits(self.graph.search(&query))
         } else if is_switcher {
             PaletteResults::Notes(self.switcher_matches(&query))
+        } else if is_move {
+            PaletteResults::Folders(self.folder_matches(&query))
         } else {
             PaletteResults::Notes(Vec::new())
         };
@@ -305,6 +367,29 @@ impl Workspace {
             state.results = results;
             state.selected = 0;
         }
+    }
+
+    /// Фаззи-подбор папок для перемещения.
+    fn folder_matches(&self, query: &str) -> Vec<String> {
+        let query = query.trim().to_lowercase();
+        let mut scored: Vec<(i64, String)> = Vec::new();
+        for folder in self.vault.folders() {
+            let label = if folder.is_empty() {
+                "(корень хранилища)".to_string()
+            } else {
+                folder.clone()
+            };
+            let score = if query.is_empty() {
+                0
+            } else if let Some(score) = fuzzy_score(&query, &label.to_lowercase()) {
+                score
+            } else {
+                continue;
+            };
+            scored.push((score, folder));
+        }
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        scored.into_iter().map(|(_, folder)| folder).collect()
     }
 
     /// Перемещение выбора в списке результатов.
@@ -349,6 +434,20 @@ impl Workspace {
             }
             (PaletteMode::AddRemote, _) => {
                 self.add_remote(&state.query, cx);
+            }
+            (PaletteMode::CreateNote { dir }, _) => {
+                self.tree_create_note(&dir, &state.query, cx);
+            }
+            (PaletteMode::CreateFolder { dir }, _) => {
+                self.tree_create_folder(&dir, &state.query, cx);
+            }
+            (PaletteMode::RenameEntry { path }, _) => {
+                self.tree_rename_entry(&path, &state.query, cx);
+            }
+            (PaletteMode::MoveEntry { path }, PaletteResults::Folders(folders)) => {
+                if let Some(dest) = folders.into_iter().nth(state.selected) {
+                    self.tree_move_entry(&path, &dest, cx);
+                }
             }
             _ => {}
         }
@@ -482,6 +581,14 @@ impl Workspace {
             PaletteMode::Search => "Поиск: слова, \"фраза\", tag:, path:, link: — Enter открыть",
             PaletteMode::Rename { .. } => "Переименование (ссылки будут обновлены)",
             PaletteMode::AddRemote => "Git remote: url (github/gitlab/bitbucket) — Enter добавить",
+            PaletteMode::CreateNote { .. } => "Новая заметка: имя — Enter создать",
+            PaletteMode::CreateFolder { .. } => "Новая папка: имя — Enter создать",
+            PaletteMode::RenameEntry { .. } => "Переименование (ссылки на заметку будут обновлены)",
+            PaletteMode::MoveEntry { .. } => "Переместить в…: выберите папку — Enter подтвердить",
+        };
+        let move_path = match &state.mode {
+            PaletteMode::MoveEntry { path } => Some(path.clone()),
+            _ => None,
         };
 
         let panel = div()
@@ -654,6 +761,38 @@ impl Workspace {
                                     .into_any_element()
                             })
                             .collect::<Vec<_>>(),
+                        PaletteResults::Folders(folders) => folders
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, folder)| {
+                                let is_selected = ix == state.selected;
+                                let label = if folder.is_empty() {
+                                    "(корень хранилища)".to_string()
+                                } else {
+                                    folder.clone()
+                                };
+                                let dest = folder.clone();
+                                let path = move_path.clone().unwrap_or_default();
+                                div()
+                                    .id(gpui::SharedString::from(format!("palette-folder:{label}")))
+                                    .px_3()
+                                    .py_1()
+                                    .cursor_pointer()
+                                    .bg(if is_selected {
+                                        self.palette.hover
+                                    } else {
+                                        self.palette.background
+                                    })
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        this.palette_state = None;
+                                        this.focus_handle.focus(window);
+                                        this.tree_move_entry(&path, &dest, cx);
+                                        cx.notify();
+                                    }))
+                                    .child(div().text_size(px(13.)).child(label))
+                                    .into_any_element()
+                            })
+                            .collect::<Vec<_>>(),
                     }),
             )
             .children(self.palette_hint(state));
@@ -737,7 +876,10 @@ impl Workspace {
                 PaletteMode::Search => "Введите запрос — поиск идёт по мере ввода",
                 PaletteMode::QuickSwitcher => "Введите имя заметки",
                 PaletteMode::AddRemote => "Например: git@github.com:user/vault.git или https://…",
-                PaletteMode::Rename { .. } => return None,
+                PaletteMode::CreateNote { .. } => "Имя заметки (расширение .md добавится)",
+                PaletteMode::CreateFolder { .. } => "Имя папки",
+                PaletteMode::MoveEntry { .. } => "Введите имя папки для фильтра",
+                PaletteMode::Rename { .. } | PaletteMode::RenameEntry { .. } => return None,
             }
         } else {
             "Ничего не найдено"

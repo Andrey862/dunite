@@ -25,6 +25,7 @@ use crate::editor_pane::ClickTracker;
 use crate::images;
 use crate::palette::{PaletteMode, PaletteResults, PaletteState};
 use crate::theme::Palette;
+use crate::tree_menu::{TreeClip, TreeMenuState};
 
 /// Состояние загрузки изображения (SPEC §7.5).
 pub enum ImageState {
@@ -88,6 +89,10 @@ pub struct Workspace {
     pub(crate) nav_forward: Vec<(NoteId, usize)>,
     /// Наблюдатель за внешними изменениями файлов (SPEC §11).
     pub(crate) watcher: Option<VaultWatcher>,
+    /// Контекстное меню дерева файлов (SPEC §9.1).
+    pub(crate) tree_menu: Option<TreeMenuState>,
+    /// Буфер обмена дерева (копировать/вырезать).
+    pub(crate) tree_clipboard: Option<TreeClip>,
     /// Git-репозиторий хранилища (SPEC §10).
     pub(crate) git: Option<GitRepo>,
     /// Последнее изменение — для автоснапшота.
@@ -154,6 +159,8 @@ impl Workspace {
             nav_back: Vec::new(),
             nav_forward: Vec::new(),
             watcher: None,
+            tree_menu: None,
+            tree_clipboard: None,
             git,
             last_edit: None,
             last_snapshot: None,
@@ -362,6 +369,211 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    // ── операции дерева файлов (SPEC §9.1) ──────────────────────────────
+
+    /// Обновление после файловых операций: дерево, вкладки, рендер.
+    fn tree_refresh(&mut self, cx: &mut Context<Self>) {
+        let _ = self.vault.rescan();
+        self.reload_all_tabs();
+        self.layout = None;
+        cx.notify();
+    }
+
+    /// Создаёт заметку и открывает её.
+    pub(crate) fn tree_create_note(&mut self, dir: &str, name: &str, cx: &mut Context<Self>) {
+        match self.vault.create_note(dir, name) {
+            Ok(id) => {
+                self.graph.update_note(&self.vault, &id);
+                self.tree_refresh(cx);
+                self.open_note(id.as_str(), cx);
+                self.status_message = format!("создана заметка {}", id.as_str());
+            }
+            Err(err) => {
+                self.status_message = format!("не удалось создать заметку: {err}");
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn tree_create_folder(&mut self, dir: &str, name: &str, cx: &mut Context<Self>) {
+        match self.vault.create_folder(dir, name) {
+            Ok(path) => {
+                self.tree_refresh(cx);
+                self.status_message = format!("создана папка {path}");
+            }
+            Err(err) => {
+                self.status_message = format!("не удалось создать папку: {err}");
+            }
+        }
+        cx.notify();
+    }
+
+    /// Переименование файла/папки/вложения (SPEC §7.2: ссылки обновляются).
+    pub(crate) fn tree_rename_entry(&mut self, path: &str, new_name: &str, cx: &mut Context<Self>) {
+        let parent = crate::tree_menu::parent_dir(path);
+        let to = if parent.is_empty() {
+            new_name.trim().to_string()
+        } else {
+            format!("{}/{}", parent, new_name.trim())
+        };
+        let is_folder = self.vault.absolute(path).is_dir();
+        let is_note = path.to_lowercase().ends_with(".md");
+
+        let result: std::io::Result<usize> = if is_folder {
+            self.graph.rename_folder(&self.vault, path, &to)
+        } else if is_note {
+            self.graph
+                .rename_note(&self.vault, &NoteId::new(path), &NoteId::new(&to))
+        } else {
+            self.vault.rename_entry(path, new_name).map(|_| 0usize)
+        };
+
+        match result {
+            Ok(updated) => {
+                self.retag_tabs_after_move(path, &to, is_folder);
+                self.tree_refresh(cx);
+                self.status_message = if updated > 0 {
+                    format!("переименовано в {to}: обновлено ссылок: {updated}")
+                } else {
+                    format!("переименовано в {to}")
+                };
+            }
+            Err(err) => {
+                self.status_message = format!("переименование не удалось: {err}");
+            }
+        }
+        cx.notify();
+    }
+
+    /// Перемещение файла/папки в `dest_dir` (ссылки обновляются).
+    pub(crate) fn tree_move_entry(&mut self, path: &str, dest_dir: &str, cx: &mut Context<Self>) {
+        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        let to_name = self.vault.free_name(dest_dir, &name);
+        let to = if dest_dir.is_empty() {
+            to_name
+        } else {
+            format!("{dest_dir}/{to_name}")
+        };
+        let is_folder = self.vault.absolute(path).is_dir();
+        let is_note = path.to_lowercase().ends_with(".md");
+
+        let moved: std::io::Result<usize> = if is_folder {
+            self.graph.rename_folder(&self.vault, path, &to)
+        } else if is_note {
+            self.graph
+                .rename_note(&self.vault, &NoteId::new(path), &NoteId::new(&to))
+        } else {
+            self.vault.move_entry(path, dest_dir).map(|_| 0usize)
+        };
+
+        match moved {
+            Ok(updated) => {
+                self.retag_tabs_after_move(path, &to, is_folder);
+                self.tree_refresh(cx);
+                self.status_message = if updated > 0 {
+                    format!("перемещено в {to}: обновлено ссылок: {updated}")
+                } else {
+                    format!("перемещено в {to}")
+                };
+            }
+            Err(err) => {
+                self.status_message = format!("перемещение не удалось: {err}");
+            }
+        }
+        cx.notify();
+    }
+
+    /// Копирование/перемещение через буфер обмена дерева.
+    pub(crate) fn tree_paste(
+        &mut self,
+        clip: &crate::tree_menu::TreeClip,
+        dest_dir: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if clip.cut {
+            self.tree_move_entry(&clip.path, dest_dir, cx);
+            self.tree_clipboard = None;
+            return;
+        }
+        match self.vault.copy_entry(&clip.path, dest_dir) {
+            Ok(new_path) => {
+                self.tree_refresh(cx);
+                for id in self.vault.notes_under(&new_path) {
+                    self.graph.update_note(&self.vault, &id);
+                }
+                self.status_message = format!("вставлено: {new_path}");
+            }
+            Err(err) => {
+                self.status_message = format!("вставка не удалась: {err}");
+            }
+        }
+        cx.notify();
+    }
+
+    /// Удаление файла/папки. Безопасно: сначала git-снапшот (SPEC §10).
+    pub(crate) fn tree_delete(&mut self, path: &str, cx: &mut Context<Self>) {
+        let is_folder = self.vault.absolute(path).is_dir();
+        let is_note = path.to_lowercase().ends_with(".md");
+        let removed: Vec<NoteId> = if is_folder {
+            self.vault.notes_under(path)
+        } else if is_note {
+            vec![NoteId::new(path)]
+        } else {
+            Vec::new()
+        };
+
+        // восстановимо из истории в любом случае
+        if self.git.is_some() {
+            self.save_all();
+            if let Some(git) = self.git.as_ref() {
+                let _ = git.snapshot_with_message(&format!("перед удалением {path}"));
+                self.last_snapshot = Some(dunite_git::now_local());
+            }
+        }
+
+        match self.vault.delete_entry(path) {
+            Ok(()) => {
+                self.close_tabs_under(path);
+                for id in removed {
+                    self.graph.remove_note(&id);
+                }
+                self.tree_refresh(cx);
+                self.status_message =
+                    format!("удалено: {path} — восстановить можно из истории (git)");
+            }
+            Err(err) => {
+                self.status_message = format!("удаление не удалось: {err}");
+            }
+        }
+        cx.notify();
+    }
+
+    /// Закрывает вкладки удалённого файла/папки.
+    fn close_tabs_under(&mut self, path: &str) {
+        let prefix = format!("{path}/");
+        self.tabs.retain(|tab| {
+            let id = tab.note_id.as_str();
+            id != path && !id.starts_with(&prefix)
+        });
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len().saturating_sub(1);
+        }
+    }
+
+    /// Обновляет note_id вкладок после переименования/перемещения.
+    fn retag_tabs_after_move(&mut self, from: &str, to: &str, is_folder: bool) {
+        let from_prefix = format!("{from}/");
+        for tab in &mut self.tabs {
+            let id = tab.note_id.as_str();
+            if is_folder && id.starts_with(&from_prefix) {
+                let suffix = &id[from.len()..];
+                tab.note_id = NoteId::new(format!("{to}{suffix}"));
+            } else if !is_folder && id == from {
+                tab.note_id = NoteId::new(to);
+            }
+        }
     }
 
     /// Строка git-состояния для статус-бара (SPEC §9.5).
@@ -867,6 +1079,7 @@ impl Render for Workspace {
             )
             .child(self.render_status_bar())
             .children(self.render_palette(cx))
+            .children(self.render_tree_menu(cx))
     }
 }
 

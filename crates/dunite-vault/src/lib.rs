@@ -173,6 +173,140 @@ impl Vault {
         }
         walk(&self.tree, name).map(|entry| entry.rel_path.clone())
     }
+
+    // ── файловые операции (SPEC §9.1) ────────────────────────────────────
+
+    /// Создаёт пустую заметку в `rel_dir`; расширение `.md` добавляется.
+    pub fn create_note(&self, rel_dir: &str, name: &str) -> io::Result<NoteId> {
+        let name = ensure_extension(name.trim(), ".md");
+        let dir = self.root.join(rel_dir);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(&name);
+        if path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{name} уже существует"),
+            ));
+        }
+        std::fs::write(&path, "")?;
+        Ok(NoteId::new(join_rel(rel_dir, &name)))
+    }
+
+    /// Создаёт папку в `rel_dir`.
+    pub fn create_folder(&self, rel_dir: &str, name: &str) -> io::Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "пустое имя"));
+        }
+        let path = self.root.join(rel_dir).join(name);
+        std::fs::create_dir_all(&path)?;
+        Ok(join_rel(rel_dir, name))
+    }
+
+    /// Удаляет файл или папку (папку — рекурсивно).
+    ///
+    /// Безопасно: перед удалением UI делает git-снапшот (SPEC §10).
+    pub fn delete_entry(&self, rel_path: &str) -> io::Result<()> {
+        let path = self.root.join(rel_path);
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        }
+    }
+
+    /// Копирует файл или папку (рекурсивно) в `dest_dir`.
+    ///
+    /// При конфликте имён добавляет «копия»/«копия N»; возвращает новый путь.
+    pub fn copy_entry(&self, src_rel: &str, dest_dir: &str) -> io::Result<String> {
+        let src = self.root.join(src_rel);
+        let dest_dir_path = self.root.join(dest_dir);
+        std::fs::create_dir_all(&dest_dir_path)?;
+        let original_name = file_name(src_rel);
+        let name = unique_name(&dest_dir_path, &original_name);
+        copy_recursive(&src, &dest_dir_path.join(&name))?;
+        Ok(join_rel(dest_dir, &name))
+    }
+
+    /// Перемежает файл или папку в `dest_dir`; возвращает новый путь.
+    ///
+    /// При конфликте имён — «копия»/«копия N» (как при копировании).
+    pub fn move_entry(&self, src_rel: &str, dest_dir: &str) -> io::Result<String> {
+        let src = self.root.join(src_rel);
+        let dest_dir_path = self.root.join(dest_dir);
+        std::fs::create_dir_all(&dest_dir_path)?;
+        let original_name = file_name(src_rel);
+        let name = unique_name(&dest_dir_path, &original_name);
+        let dest = dest_dir_path.join(&name);
+        if std::fs::rename(&src, &dest).is_err() {
+            // другие ФС: копируем и удаляем источник
+            copy_recursive(&src, &dest)?;
+            if src.is_dir() {
+                std::fs::remove_dir_all(&src)?;
+            } else {
+                std::fs::remove_file(&src)?;
+            }
+        }
+        Ok(join_rel(dest_dir, &name))
+    }
+
+    /// Свободное имя файла в `dest_dir` (с «копия» при конфликте) —
+    /// для планирования перемещений.
+    pub fn free_name(&self, dest_dir: &str, name: &str) -> String {
+        unique_name(&self.root.join(dest_dir), name)
+    }
+
+    /// Переименовывает файл или папку в пределах той же папки (точное имя).
+    pub fn rename_entry(&self, rel_path: &str, new_name: &str) -> io::Result<String> {
+        let new_name = new_name.trim();
+        if new_name.is_empty() || new_name.contains('/') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "некорректное имя",
+            ));
+        }
+        let parent = rel_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+        let dest = self.root.join(parent).join(new_name);
+        if dest.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{new_name} уже существует"),
+            ));
+        }
+        std::fs::rename(self.root.join(rel_path), &dest)?;
+        Ok(join_rel(parent, new_name))
+    }
+
+    /// Заметки внутри `rel_prefix` (рекурсивно) — для переименования папок.
+    pub fn notes_under(&self, rel_prefix: &str) -> Vec<NoteId> {
+        fn walk<'a>(entries: &'a [VaultEntry], prefix: &str, out: &mut Vec<NoteId>) {
+            for entry in entries {
+                if entry.is_folder() {
+                    walk(&entry.children, prefix, out);
+                } else if entry.kind.is_note() && entry.rel_path.starts_with(prefix) {
+                    out.push(entry.note_id());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.tree, rel_prefix, &mut out);
+        out
+    }
+
+    /// Все папки хранилища (включая корень `""`) — для выбора назначения.
+    pub fn folders(&self) -> Vec<String> {
+        fn walk<'a>(entries: &'a [VaultEntry], out: &mut Vec<String>) {
+            for entry in entries {
+                if entry.is_folder() {
+                    out.push(entry.rel_path.clone());
+                    walk(&entry.children, out);
+                }
+            }
+        }
+        let mut out = vec![String::new()];
+        walk(&self.tree, &mut out);
+        out
+    }
 }
 
 #[derive(Default)]
@@ -254,6 +388,67 @@ fn classify(name: &str) -> EntryKind {
     }
 }
 
+/// Склеивает относительный путь (`""` + `имя` = `имя`).
+fn join_rel(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+/// Последний компонент относительного пути.
+fn file_name(rel_path: &str) -> String {
+    rel_path.rsplit('/').next().unwrap_or(rel_path).to_string()
+}
+
+/// Добавляет расширение, если его нет.
+fn ensure_extension(name: &str, ext: &str) -> String {
+    if name.to_lowercase().ends_with(ext) {
+        name.to_string()
+    } else {
+        format!("{name}{ext}")
+    }
+}
+
+/// Свободное имя в `dir`: `имя` → `имя копия` → `имя копия 2` …
+fn unique_name(dir: &Path, name: &str) -> String {
+    if !dir.join(name).exists() {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (name, String::new()),
+    };
+    let mut counter = 1;
+    loop {
+        let candidate = if counter == 1 {
+            format!("{stem} копия{ext}")
+        } else {
+            format!("{stem} копия {counter}{ext}")
+        };
+        if !dir.join(&candidate).exists() {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+/// Рекурсивное копирование файла или папки.
+fn copy_recursive(src: &Path, dest: &Path) -> io::Result<()> {
+    if src.is_dir() {
+        std::fs::create_dir_all(dest)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &dest.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(src, dest)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,5 +518,95 @@ mod tests {
     #[test]
     fn open_rejects_nonexistent() {
         assert!(Vault::open("/definitely/not/here").is_err());
+    }
+
+    // ── файловые операции (SPEC §9.1) ──────────────────────────────────
+
+    #[test]
+    fn create_note_and_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+
+        let folder = vault.create_folder("", "Проекты").unwrap();
+        assert_eq!(folder, "Проекты");
+
+        let id = vault.create_note("Проекты", "Идея").unwrap();
+        assert_eq!(id.as_str(), "Проекты/Идея.md"); // расширение добавилось
+        assert!(dir.path().join("Проекты/Идея.md").is_file());
+
+        // дубликат не создаётся
+        assert!(vault.create_note("Проекты", "Идея").is_err());
+    }
+
+    #[test]
+    fn delete_file_and_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        vault.create_folder("", "Ветка").unwrap();
+        vault.create_note("Ветка", "Файл").unwrap();
+        vault.create_note("", "Верхний").unwrap();
+
+        vault.delete_entry("Верхний.md").unwrap();
+        assert!(!dir.path().join("Верхний.md").exists());
+        vault.delete_entry("Ветка").unwrap();
+        assert!(!dir.path().join("Ветка").exists());
+    }
+
+    #[test]
+    fn copy_entry_with_unique_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        vault.create_folder("", "Архив").unwrap();
+        vault.create_note("", "Дубль").unwrap();
+
+        let first = vault.copy_entry("Дубль.md", "Архив").unwrap();
+        assert_eq!(first, "Архив/Дубль.md");
+        let second = vault.copy_entry("Дубль.md", "Архив").unwrap();
+        assert_eq!(second, "Архив/Дубль копия.md");
+        let third = vault.copy_entry("Дубль.md", "Архив").unwrap();
+        assert_eq!(third, "Архив/Дубль копия 2.md");
+    }
+
+    #[test]
+    fn copy_folder_recursively() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        vault.create_folder("", "Исходник").unwrap();
+        vault.create_folder("Исходник", "Подпапка").unwrap();
+        vault.create_note("Исходник/Подпапка", "Глубокая").unwrap();
+
+        let copy = vault.copy_entry("Исходник", "").unwrap();
+        assert_eq!(copy, "Исходник копия");
+        assert!(
+            dir.path()
+                .join("Исходник копия/Подпапка/Глубокая.md")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn move_entry_between_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        vault.create_folder("", "Откуда").unwrap();
+        vault.create_folder("", "Куда").unwrap();
+        vault.create_note("Откуда", "Переезд").unwrap();
+
+        let moved = vault.move_entry("Откуда/Переезд.md", "Куда").unwrap();
+        assert_eq!(moved, "Куда/Переезд.md");
+        assert!(dir.path().join("Куда/Переезд.md").is_file());
+        assert!(!dir.path().join("Откуда/Переезд.md").exists());
+    }
+
+    #[test]
+    fn notes_under_and_folders() {
+        let (_dir, vault) = fixture_vault();
+        let under = vault.notes_under("projects");
+        assert_eq!(under.len(), 2); // Alpha.md и Бета.md (картинка — не заметка)
+
+        let mut folders = vault.folders();
+        folders.sort();
+        assert_eq!(folders, vec!["", "projects", "projects/inner"]);
+        let _ = _dir;
     }
 }

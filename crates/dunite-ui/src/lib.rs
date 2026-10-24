@@ -12,6 +12,7 @@ pub mod sidebar;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod theme;
+pub mod tree_menu;
 pub mod workspace;
 
 pub use keys::{global_key_bindings, key_bindings, palette_key_bindings};

@@ -321,6 +321,104 @@ impl LinkGraph {
         (tf, docs.len())
     }
 
+    /// Переименовывает или перемещает ПАПКУ (SPEC §7.2).
+    ///
+    /// Переписываются только path-ссылки (`[[Папка/Заметка]]`) на заметки
+    /// внутри папки; короткие `[[Заметка]]` и алиасы не трогаем — они
+    /// резолвятся по-новой сами. Возвращает число обновлённых ссылок.
+    pub fn rename_folder(&mut self, vault: &Vault, from: &str, to: &str) -> std::io::Result<usize> {
+        use std::io;
+
+        let from = from.trim_end_matches('/');
+        let to = to.trim_end_matches('/');
+        let from_path = vault.absolute(from);
+        let to_path = vault.absolute(to);
+        if !from_path.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("нет папки {from}"),
+            ));
+        }
+        if to_path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{to} уже существует"),
+            ));
+        }
+
+        // 1. переписать path-ссылки на заметки внутри папки
+        let prefix = format!("{from}/");
+        let new_prefix = format!("{to}/");
+        let mut by_source: HashMap<NoteId, Vec<BacklinkRef>> = HashMap::new();
+        for (source, meta) in &self.metas {
+            for link in &meta.links {
+                if link.target_text.starts_with(&prefix) {
+                    by_source
+                        .entry(source.clone())
+                        .or_default()
+                        .push(BacklinkRef {
+                            source: source.clone(),
+                            range: link.range.clone(),
+                            target_range: link.target_range.clone(),
+                            target_text: link.target_text.clone(),
+                            display: link.display.clone(),
+                            context: link.context.clone(),
+                            line: link.line,
+                        });
+                }
+            }
+        }
+
+        let mut updated = 0usize;
+        let mut rewritten: Vec<NoteId> = Vec::new();
+        for (source, mut refs) in by_source {
+            let Ok(text) = vault.read_note(source.as_str()) else {
+                continue;
+            };
+            let mut chars: Vec<char> = text.chars().collect();
+            refs.sort_by_key(|ref_| ref_.target_range.start);
+            for ref_ in refs.iter().rev() {
+                if ref_.target_range.end > chars.len() {
+                    continue;
+                }
+                let replacement = format!("{new_prefix}{}", &ref_.target_text[prefix.len()..]);
+                chars.splice(ref_.target_range.clone(), replacement.chars());
+                updated += 1;
+            }
+            let new_text: String = chars.into_iter().collect();
+            std::fs::write(vault.absolute(source.as_str()), new_text)?;
+            rewritten.push(source);
+        }
+
+        // 2. переместить папку
+        if let Some(parent) = to_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&from_path, &to_path)?;
+
+        // 3. обновить граф: перечитать переписанные источники и перемещённые
+        for source in &rewritten {
+            self.update_note(vault, source);
+        }
+        let moved: Vec<String> = vault
+            .notes_under(from)
+            .iter()
+            .map(|id| {
+                let suffix = &id.as_str()[from.len()..];
+                format!("{to}{suffix}")
+            })
+            .collect();
+        for old in vault.notes_under(from) {
+            self.remove_note(&old);
+        }
+        for new_id in moved {
+            self.update_note(vault, &NoteId::new(new_id));
+        }
+        self.backlinks.clear();
+        self.resolve_all();
+        Ok(updated)
+    }
+
     /// Переименовывает заметку и переписывает все ссылающиеся ссылки
     /// (SPEC §7.2: «пересохранение ссылок при переименовании обязательно»).
     ///
@@ -615,6 +713,43 @@ mod tests {
         // новая на Главная появилась
         let refs = graph.backlinks(&NoteId::new("Главная.md"));
         assert!(refs.iter().any(|r| r.source == id));
+    }
+
+    #[test]
+    fn rename_folder_rewrites_path_links_only() {
+        let (_dir, mut graph, mut vault) = graph();
+        fs::write(
+            vault.absolute("Главная.md"),
+            "см. [[projects/Бета]] и [[Alpha]] и [[Home]]\n",
+        )
+        .unwrap();
+        vault.rescan().unwrap();
+        graph.update_note(&vault, &NoteId::new("Главная.md"));
+
+        let updated = graph.rename_folder(&vault, "projects", "архив").unwrap();
+        // path-ссылки: [[projects/Бета]] из Главной и из projects/Alpha.md
+        assert_eq!(updated, 2);
+
+        // path-ссылка переписана, короткая и алиасная — нет (резолвятся сами)
+        let text = vault.read_note("Главная.md").unwrap();
+        assert!(text.contains("[[архив/Бета]]"), "{text}");
+        assert!(text.contains("[[Alpha]]"), "{text}");
+        assert!(text.contains("[[Home]]"), "{text}");
+        assert!(vault.absolute("архив/Бета.md").is_file());
+
+        // резолвинг после переименования работает
+        assert_eq!(
+            graph.resolve(&NoteId::new("Главная.md"), "архив/Бета"),
+            Some(NoteId::new("архив/Бета.md"))
+        );
+    }
+
+    #[test]
+    fn rename_folder_refuses_existing_target() {
+        let (_dir, mut graph, vault) = graph();
+        fs::create_dir_all(vault.absolute("архив")).unwrap();
+        assert!(graph.rename_folder(&vault, "projects", "архив").is_err());
+        assert!(graph.rename_folder(&vault, "нет такой", "новая").is_err());
     }
 
     #[test]

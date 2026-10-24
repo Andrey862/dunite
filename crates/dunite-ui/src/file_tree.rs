@@ -38,6 +38,12 @@ impl Workspace {
                     .flex_col()
                     .flex_1()
                     .overflow_y_scroll()
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(|this, event: &gpui::MouseDownEvent, _window, cx| {
+                            this.open_tree_menu(event.position, None, cx);
+                        }),
+                    )
                     .children(self.render_entries(self.vault.tree(), 0, cx)),
             )
     }
@@ -71,6 +77,7 @@ impl Workspace {
                 // «съедает» клики (один обработчик выбрасывает событие другого).
                 // rel_path уникален — используем его.
                 let row_id: gpui::SharedString = rel_path.clone().into();
+                let menu_path = rel_path.clone();
                 let row = div()
                     .id(row_id)
                     .flex()
@@ -94,6 +101,19 @@ impl Workspace {
                             cx.notify();
                         }
                     }))
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |this, event: &gpui::MouseDownEvent, _window, cx| {
+                            this.open_tree_menu(
+                                event.position,
+                                Some(crate::tree_menu::TreeTarget {
+                                    path: menu_path.clone(),
+                                    is_folder: kind.is_folder(),
+                                }),
+                                cx,
+                            );
+                        }),
+                    )
                     .child(
                         div()
                             .w(px(12.))
