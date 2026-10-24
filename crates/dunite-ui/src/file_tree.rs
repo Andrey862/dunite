@@ -104,6 +104,9 @@ impl Workspace {
                     .on_mouse_down(
                         gpui::MouseButton::Right,
                         cx.listener(move |this, event: &gpui::MouseDownEvent, _window, cx| {
+                            // клик по строке не должен всплывать к контейнеру:
+                            // иначе его обработчик перезапишет меню корневым
+                            cx.stop_propagation();
                             this.open_tree_menu(
                                 event.position,
                                 Some(crate::tree_menu::TreeTarget {
