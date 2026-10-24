@@ -217,3 +217,16 @@ pub(crate) fn parent_dir(rel_path: &str) -> String {
         None => String::new(),
     }
 }
+
+/// Разрешён ли drop: не в себя, не в собственную подпапку и не в ту же
+/// папку (перетаскивание туда, где и так лежим, бессмысленно).
+pub(crate) fn drop_allowed(drag: &TreeTarget, dest_dir: &str) -> bool {
+    if drag.path == dest_dir {
+        return false;
+    }
+    let own_subtree = format!("{}/", drag.path);
+    if dest_dir.starts_with(&own_subtree) {
+        return false;
+    }
+    parent_dir(&drag.path) != dest_dir
+}
