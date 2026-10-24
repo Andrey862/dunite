@@ -7,13 +7,16 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use dunite_editor::Editor;
-use dunite_git::{CommitInfo, DiffLine, GitRepo};
+use dunite_git::{CommitInfo, GitRepo};
 use dunite_index::LinkGraph;
 use dunite_markdown::ParsedNote;
 use dunite_settings::Settings;
 use dunite_vault::watch::{VaultEvent, VaultWatcher};
 use dunite_vault::{NoteId, Vault};
-use gpui::{Context, FocusHandle, FontWeight, Render, RenderImage, Window, div, prelude::*, px};
+use gpui::{
+    Context, FocusHandle, FontWeight, MouseDownEvent, MouseMoveEvent, Render, RenderImage, Window,
+    div, prelude::*, px,
+};
 
 use crate::actions::{
     CloseTab, InitGit, NavBack, NavForward, NextTab, OpenSearch, OpenSwitcher, PrevTab, Quit,
@@ -104,7 +107,14 @@ pub struct Workspace {
     /// Раскрытый коммит в timeline (diff-превью).
     pub(crate) git_expanded: Option<String>,
     /// Diff-строки раскрытого коммита.
-    pub(crate) git_diff: Vec<DiffLine>,
+    pub(crate) git_diff: Vec<dunite_git::DiffLine>,
+    /// Файлы раскрытого коммита и выбранный для превью/восстановления.
+    pub(crate) git_diff_files: Vec<String>,
+    pub(crate) git_diff_file: Option<String>,
+    /// Ширина правой панели (перетаскиваемая граница, SPEC §9).
+    pub(crate) right_panel_width: f32,
+    pub(crate) panel_dragging: bool,
+    pub(crate) panel_drag_last_x: f32,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active_tab: usize,
     pub(crate) status_message: String,
@@ -167,6 +177,11 @@ impl Workspace {
             git_scope_note: true,
             git_expanded: None,
             git_diff: Vec::new(),
+            git_diff_files: Vec::new(),
+            git_diff_file: None,
+            right_panel_width: 280.,
+            panel_dragging: false,
+            panel_drag_last_x: 0.,
             save_generation: 0,
         }
     }
@@ -616,41 +631,74 @@ impl Workspace {
     }
 
     /// Раскрыть/свернуть diff-превью коммита.
+    ///
+    /// Файлы берутся из САМОГО коммита: удалённая заметка не имеет
+    /// вкладки, восстановление работает по файлу коммита (SPEC §10.2).
     pub(crate) fn toggle_git_diff(&mut self, commit_id: &str, cx: &mut Context<Self>) {
         if self.git_expanded.as_deref() == Some(commit_id) {
             self.git_expanded = None;
             self.git_diff.clear();
+            self.git_diff_files.clear();
+            self.git_diff_file = None;
             cx.notify();
             return;
         }
         let Some(git) = self.git.as_ref() else {
             return;
         };
-        let rel_path = self
+        let mut files = git.commit_files(commit_id).unwrap_or_default();
+        files.sort();
+        // выбранный файл: активная заметка, если она в коммите; иначе первая
+        // заметка коммита; иначе первый файл
+        let preferred = self
             .tabs
             .get(self.active_tab)
-            .map(|tab| tab.note_id.as_str().to_string());
-        self.git_diff = rel_path
-            .and_then(|path| git.diff_note(commit_id, &path).ok())
+            .map(|tab| tab.note_id.as_str().to_string())
+            .filter(|id| files.iter().any(|file| file == id))
+            .or_else(|| files.iter().find(|file| file.ends_with(".md")).cloned())
+            .or_else(|| files.first().cloned());
+        self.git_diff = preferred
+            .as_ref()
+            .and_then(|path| git.diff_note(commit_id, path).ok())
             .unwrap_or_default();
+        self.git_diff_file = preferred;
+        self.git_diff_files = files;
         self.git_expanded = Some(commit_id.to_string());
         cx.notify();
     }
 
-    /// Восстановить заметку из коммита (SPEC §10.2: всегда новый коммит).
-    pub(crate) fn restore_from_commit(&mut self, commit_id: &str, cx: &mut Context<Self>) {
-        let Some(rel_path) = self
-            .tabs
-            .get(self.active_tab)
-            .map(|tab| tab.note_id.as_str().to_string())
-        else {
-            return;
-        };
+    /// Выбор файла коммита для diff-превью (клик по чипу файла).
+    pub(crate) fn select_git_diff_file(
+        &mut self,
+        commit_id: &str,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some(git) = self.git.as_ref() else {
             return;
         };
-        match git.restore_note(commit_id, &rel_path) {
+        self.git_diff_file = Some(path.to_string());
+        self.git_diff = git.diff_note(commit_id, path).ok().unwrap_or_default();
+        cx.notify();
+    }
+
+    /// Восстановить файл из коммита (SPEC §10.2: всегда новый коммит).
+    pub(crate) fn restore_from_commit(
+        &mut self,
+        commit_id: &str,
+        rel_path: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(git) = self.git.as_ref() else {
+            return;
+        };
+        match git.restore_note(commit_id, rel_path) {
             Ok(_) => {
+                // файл мог быть удалён — вернуть его в дерево и граф
+                let _ = self.vault.rescan();
+                if rel_path.to_lowercase().ends_with(".md") {
+                    self.graph.update_note(&self.vault, &NoteId::new(rel_path));
+                }
                 self.save_generation += 1;
                 self.reload_all_tabs();
                 self.snapshot_now("восстановление из истории", cx);
@@ -660,6 +708,32 @@ impl Workspace {
                 self.status_message = format!("git: восстановление не удалось: {err}");
             }
         }
+        cx.notify();
+    }
+
+    // ── граница правой панели (ресайз) ──────────────────────────────────
+
+    /// Начало перетаскивания границы.
+    pub(crate) fn panel_drag_start(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        self.panel_dragging = true;
+        self.panel_drag_last_x = event.position.x.to_f64() as f32;
+        cx.notify();
+    }
+
+    /// Перетаскивание: тянем влево — панель шире.
+    pub(crate) fn panel_drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !self.panel_dragging {
+            return;
+        }
+        let x = event.position.x.to_f64() as f32;
+        let delta = self.panel_drag_last_x - x;
+        self.panel_drag_last_x = x;
+        self.right_panel_width = (self.right_panel_width + delta).clamp(220., 720.);
+        cx.notify();
+    }
+
+    pub(crate) fn panel_drag_end(&mut self, cx: &mut Context<Self>) {
+        self.panel_dragging = false;
         cx.notify();
     }
 
@@ -1062,6 +1136,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SaveNote, _, cx| this.save_and_snapshot(cx)))
             .on_action(cx.listener(|this, _: &ReloadNote, _, cx| this.reload_active_tab(cx)))
             .on_action(cx.listener(|this, _: &InitGit, _, cx| this.git_init(cx)))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                this.panel_drag_move(event, cx)
+            }))
             .size_full()
             .flex()
             .flex_col()

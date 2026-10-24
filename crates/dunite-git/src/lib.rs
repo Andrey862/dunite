@@ -222,6 +222,33 @@ impl GitRepo {
         Ok(lines)
     }
 
+    /// Файлы, изменённые в коммите (относительные пути).
+    ///
+    /// Для восстановления и diff-превью: удалённая заметка не имеет
+    /// открытой вкладки, поэтому ориентируемся на содержимое коммита.
+    pub fn commit_files(&self, commit_id: &str) -> Result<Vec<String>> {
+        let commit = self.find_commit(commit_id)?;
+        let parent_tree = commit
+            .parent(0)
+            .ok()
+            .map(|parent| parent.tree())
+            .transpose()?;
+        let tree = commit.tree()?;
+        let diff = self
+            .repo
+            .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
+        Ok(diff
+            .deltas()
+            .filter_map(|delta| {
+                let path = delta
+                    .new_file()
+                    .path()
+                    .or_else(|| delta.old_file().path())?;
+                Some(path.to_string_lossy().into_owned())
+            })
+            .collect())
+    }
+
     /// Возвращает содержимое заметки в коммите (для восстановления).
     pub fn note_at(&self, commit_id: &str, rel_path: &str) -> Result<String> {
         let commit = self.find_commit(commit_id)?;
@@ -526,6 +553,18 @@ mod tests {
             diff.iter()
                 .any(|line| line.origin == '+' && line.text.contains("новая"))
         );
+    }
+
+    #[test]
+    fn commit_files_lists_changed_paths() {
+        let (dir, repo) = vault();
+        fs::write(dir.path().join("Заметка.md"), "версия 2\n").unwrap();
+        fs::write(dir.path().join("Новая.md"), "новая\n").unwrap();
+        let oid = repo.snapshot().unwrap().unwrap();
+
+        let mut files = repo.commit_files(&oid).unwrap();
+        files.sort();
+        assert_eq!(files, vec!["Заметка.md", "Новая.md"]);
     }
 
     #[test]

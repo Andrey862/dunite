@@ -6,18 +6,49 @@ use gpui::{Context, div, prelude::*, px};
 use crate::workspace::Workspace;
 
 impl Workspace {
+    /// Правая панель: структура, backlinks, теги, история (SPEC §9.3).
+    /// Ширина — перетаскиваемой границей.
     pub(crate) fn render_right_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         div()
             .flex()
-            .flex_col()
-            .w(px(280.))
-            .border_l_1()
-            .border_color(self.palette.border)
-            .bg(self.palette.panel)
-            .child(self.render_outline(cx))
-            .child(self.render_backlinks(cx))
-            .child(self.render_tags(cx))
-            .child(self.render_git_history(cx))
+            .flex_row()
+            .child(
+                div()
+                    .id("panel-drag")
+                    .w(px(4.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .cursor(gpui::CursorStyle::ResizeLeftRight)
+                    .hover(|style| style.bg(self.palette.accent))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, event: &gpui::MouseDownEvent, _window, cx| {
+                            this.panel_drag_start(event, cx);
+                        }),
+                    )
+                    .on_mouse_up(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| this.panel_drag_end(cx)),
+                    )
+                    .on_mouse_up_out(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| this.panel_drag_end(cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w(px(self.right_panel_width))
+                    .flex_shrink_0()
+                    .border_l_1()
+                    .border_color(self.palette.border)
+                    .bg(self.palette.panel)
+                    .child(self.render_outline(cx))
+                    .child(self.render_backlinks(cx))
+                    .child(self.render_tags(cx))
+                    .child(self.render_git_history(cx)),
+            )
     }
 
     /// Заголовок секции.
@@ -451,6 +482,15 @@ impl Workspace {
                                 ),
                         );
                         if is_open {
+                            let commit_id_for_files = commit.id.clone();
+                            let selected_file = self.git_diff_file.clone();
+                            let restore_label = format!(
+                                "восстановить {}",
+                                selected_file
+                                    .as_deref()
+                                    .map(|file| file.rsplit('/').next().unwrap_or(file).to_string())
+                                    .unwrap_or_else(|| "файл".to_string())
+                            );
                             node = node.child(
                                 div()
                                     .px_3()
@@ -458,6 +498,37 @@ impl Workspace {
                                     .flex()
                                     .flex_col()
                                     .gap_1()
+                                    // файлы коммита: клик — выбрать для превью
+                                    .children(self.git_diff_files.iter().map(|file| {
+                                        let is_selected =
+                                            selected_file.as_deref() == Some(file.as_str());
+                                        let file_path = file.clone();
+                                        let commit_for_click = commit_id_for_files.clone();
+                                        let label =
+                                            file.rsplit('/').next().unwrap_or(file).to_string();
+                                        div()
+                                            .id(gpui::SharedString::from(format!(
+                                                "git-file:{file}"
+                                            )))
+                                            .px_1p5()
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .bg(if is_selected {
+                                                self.palette.hover
+                                            } else {
+                                                self.palette.panel
+                                            })
+                                            .on_click(cx.listener(
+                                                move |this, _event, _window, cx| {
+                                                    this.select_git_diff_file(
+                                                        &commit_for_click,
+                                                        &file_path,
+                                                        cx,
+                                                    );
+                                                },
+                                            ))
+                                            .child(div().text_size(px(10.)).truncate().child(label))
+                                    }))
                                     .children(self.git_diff.iter().map(|line| {
                                         let (color, prefix) = match line.origin {
                                             '+' => (self.palette.accent, "+"),
@@ -485,15 +556,14 @@ impl Workspace {
                                             .cursor_pointer()
                                             .hover(|style| style.bg(self.palette.hover))
                                             .on_click(cx.listener(|this, _event, _window, cx| {
-                                                if let Some(commit) = this.git_expanded.clone() {
-                                                    this.restore_from_commit(&commit, cx);
+                                                if let (Some(commit), Some(file)) = (
+                                                    this.git_expanded.clone(),
+                                                    this.git_diff_file.clone(),
+                                                ) {
+                                                    this.restore_from_commit(&commit, &file, cx);
                                                 }
                                             }))
-                                            .child(
-                                                div()
-                                                    .text_size(px(10.))
-                                                    .child("восстановить заметку"),
-                                            ),
+                                            .child(div().text_size(px(10.)).child(restore_label)),
                                     ),
                             );
                         }
