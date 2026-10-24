@@ -163,6 +163,11 @@ impl GitRepo {
         }
 
         let tree_id = index.write_tree()?;
+        // дерево совпадает с HEAD — коммит был бы пустым: не плодим их
+        let head_tree = self.head_commit().map(|commit| commit.tree_id());
+        if Some(tree_id) == head_tree {
+            return Ok(None);
+        }
         let tree = self.repo.find_tree(tree_id)?;
         let signature = Signature::now("dunite", "dunite@local")?;
         let parents: Vec<Commit> = self.head_commit().into_iter().collect();
@@ -249,15 +254,33 @@ impl GitRepo {
             .collect())
     }
 
-    /// Возвращает содержимое заметки в коммите (для восстановления).
+    /// Содержимое файла в коммите.
+    ///
+    /// Если файла в дереве коммита нет (удалён этим коммитом) — ищем
+    /// в предках: восстановление удалённого работает и с коммита-удаления
+    /// (это `git show <commit>^:<file>`, SPEC §10.2).
     pub fn note_at(&self, commit_id: &str, rel_path: &str) -> Result<String> {
-        let commit = self.find_commit(commit_id)?;
-        let entry = commit.tree()?.get_path(Path::new(rel_path))?;
-        let blob = entry
-            .to_object(&self.repo)?
-            .into_blob()
-            .map_err(|_| git2::Error::from_str("в коммите по этому пути не файл"))?;
-        Ok(String::from_utf8_lossy(blob.content()).into_owned())
+        let mut commit = self.find_commit(commit_id)?;
+        loop {
+            if let Some(text) = self.file_in_commit(&commit, rel_path) {
+                return Ok(text);
+            }
+            match commit.parent(0) {
+                Ok(parent) => commit = parent,
+                Err(_) => break,
+            }
+        }
+        Err(GitError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{rel_path} нет ни в коммите, ни в его истории"),
+        )))
+    }
+
+    /// Файл в дереве конкретного коммита (без поиска в предках).
+    fn file_in_commit(&self, commit: &Commit, rel_path: &str) -> Option<String> {
+        let entry = commit.tree().ok()?.get_path(Path::new(rel_path)).ok()?;
+        let blob = entry.to_object(&self.repo).ok()?.into_blob().ok()?;
+        Some(String::from_utf8_lossy(blob.content()).into_owned())
     }
 
     /// Восстанавливает заметку из коммита: пишет файл на диск.
@@ -565,6 +588,43 @@ mod tests {
         let mut files = repo.commit_files(&oid).unwrap();
         files.sort();
         assert_eq!(files, vec!["Заметка.md", "Новая.md"]);
+    }
+
+    #[test]
+    fn empty_snapshots_are_skipped() {
+        // пустых коммитов не бывает: чистое дерево не порождает снапшот
+        let (_dir, repo) = vault();
+        assert!(repo.snapshot_with_message("пустой").unwrap().is_none());
+        assert_eq!(repo.log(10).unwrap().len(), 1); // только init
+    }
+
+    #[test]
+    fn restore_deleted_file_falls_back_to_ancestors() {
+        // удалённый файл восстанавливается прямо с коммита-удаления:
+        // содержимое берётся из его предков (SPEC §10.2)
+        let (dir, repo) = vault();
+        fs::remove_file(dir.path().join("Заметка.md")).unwrap();
+        let removal = repo
+            .snapshot_with_message("удаление: Заметка.md")
+            .unwrap()
+            .expect("коммит удаления должен создаться");
+        assert!(!dir.path().join("Заметка.md").exists());
+
+        assert_eq!(repo.note_at(&removal, "Заметка.md").unwrap(), "версия 1\n");
+        repo.restore_note(&removal, "Заметка.md").unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("Заметка.md")).unwrap(),
+            "версия 1\n"
+        );
+    }
+
+    #[test]
+    fn note_at_missing_everywhere_errors() {
+        let (_dir, repo) = vault();
+        assert!(
+            repo.note_at(&repo.log(1).unwrap()[0].id, "нет такой.md")
+                .is_err()
+        );
     }
 
     #[test]

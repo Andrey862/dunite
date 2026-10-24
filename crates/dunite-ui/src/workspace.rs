@@ -539,12 +539,14 @@ impl Workspace {
             Vec::new()
         };
 
-        // восстановимо из истории в любом случае
+        // восстановимо из истории: фиксируем несохранённые правки до
+        // удаления (сам коммит удаления создаётся ниже)
         if self.git.is_some() {
             self.save_all();
             if let Some(git) = self.git.as_ref() {
-                let _ = git.snapshot_with_message(&format!("перед удалением {path}"));
-                self.last_snapshot = Some(dunite_git::now_local());
+                if git.has_changes() {
+                    let _ = git.snapshot_with_message(&format!("перед удалением {path}"));
+                }
             }
         }
 
@@ -555,6 +557,14 @@ impl Workspace {
                     self.graph.remove_note(&id);
                 }
                 self.tree_refresh(cx);
+                // коммит удаления: его diff содержит файл, поэтому
+                // «восстановить» работает прямо с него (SPEC §10.2)
+                if let Some(git) = self.git.as_ref() {
+                    if let Ok(Some(_)) = git.snapshot_with_message(&format!("удаление: {path}"))
+                    {
+                        self.last_snapshot = Some(dunite_git::now_local());
+                    }
+                }
                 self.status_message =
                     format!("удалено: {path} — восстановить можно из истории (git)");
             }
