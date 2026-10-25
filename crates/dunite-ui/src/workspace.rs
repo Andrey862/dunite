@@ -131,8 +131,8 @@ pub struct Workspace {
     pub(crate) right_panel_width: f32,
     pub(crate) panel_dragging: bool,
     pub(crate) panel_drag_last_x: f32,
-    pub(crate) tabs: Vec<Tab>,
-    pub(crate) active_tab: usize,
+    pub tabs: Vec<Tab>,
+    pub active_tab: usize,
     pub(crate) status_message: String,
     /// Скролл панели редактора (пиксели контента).
     pub(crate) scroll_px: f32,
@@ -436,7 +436,7 @@ impl Workspace {
     }
 
     /// Создаёт заметку и открывает её.
-    pub(crate) fn tree_create_note(&mut self, dir: &str, name: &str, cx: &mut Context<Self>) {
+    pub fn tree_create_note(&mut self, dir: &str, name: &str, cx: &mut Context<Self>) {
         match self.vault.create_note(dir, name) {
             Ok(id) => {
                 self.graph.update_note(&self.vault, &id);
@@ -451,7 +451,7 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn tree_create_folder(&mut self, dir: &str, name: &str, cx: &mut Context<Self>) {
+    pub fn tree_create_folder(&mut self, dir: &str, name: &str, cx: &mut Context<Self>) {
         match self.vault.create_folder(dir, name) {
             Ok(path) => {
                 self.tree_refresh(cx);
@@ -465,7 +465,7 @@ impl Workspace {
     }
 
     /// Переименование файла/папки/вложения (SPEC §7.2: ссылки обновляются).
-    pub(crate) fn tree_rename_entry(&mut self, path: &str, new_name: &str, cx: &mut Context<Self>) {
+    pub fn tree_rename_entry(&mut self, path: &str, new_name: &str, cx: &mut Context<Self>) {
         let parent = crate::tree_menu::parent_dir(path);
         let to = if parent.is_empty() {
             new_name.trim().to_string()
@@ -502,7 +502,7 @@ impl Workspace {
     }
 
     /// Перемещение файла/папки в `dest_dir` (ссылки обновляются).
-    pub(crate) fn tree_move_entry(&mut self, path: &str, dest_dir: &str, cx: &mut Context<Self>) {
+    pub fn tree_move_entry(&mut self, path: &str, dest_dir: &str, cx: &mut Context<Self>) {
         let name = path.rsplit('/').next().unwrap_or(path).to_string();
         let to_name = self.vault.free_name(dest_dir, &name);
         let to = if dest_dir.is_empty() {
@@ -567,7 +567,7 @@ impl Workspace {
     }
 
     /// Удаление файла/папки. Безопасно: сначала git-снапшот (SPEC §10).
-    pub(crate) fn tree_delete(&mut self, path: &str, cx: &mut Context<Self>) {
+    pub fn tree_delete(&mut self, path: &str, cx: &mut Context<Self>) {
         let is_folder = self.vault.absolute(path).is_dir();
         let is_note = path.to_lowercase().ends_with(".md");
         let removed: Vec<NoteId> = if is_folder {
@@ -761,12 +761,7 @@ impl Workspace {
     }
 
     /// Восстановить файл из коммита (SPEC §10.2: всегда новый коммит).
-    pub(crate) fn restore_from_commit(
-        &mut self,
-        commit_id: &str,
-        rel_path: &str,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn restore_from_commit(&mut self, commit_id: &str, rel_path: &str, cx: &mut Context<Self>) {
         let Some(git) = self.git.as_ref() else {
             return;
         };

@@ -635,7 +635,7 @@ impl Workspace {
     /// Ctrl+S: сохранить всё и сделать git-снапшот сейчас (SPEC §10.1).
     ///
     /// При конфликте внешних правок — записывает свою версию поверх (§14).
-    pub(crate) fn save_and_snapshot(&mut self, cx: &mut Context<Self>) {
+    pub fn save_and_snapshot(&mut self, cx: &mut Context<Self>) {
         self.save_all();
         self.snapshot_now("Ctrl+S", cx);
     }
@@ -665,7 +665,7 @@ impl Workspace {
     }
 
     /// Сохранить все открытые вкладки.
-    pub(crate) fn save_all(&mut self) {
+    pub fn save_all(&mut self) {
         for ix in 0..self.tabs.len() {
             self.save_tab_now(ix);
         }
