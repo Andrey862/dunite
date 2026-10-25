@@ -5,6 +5,11 @@ use gpui::{Context, div, prelude::*, px};
 
 use crate::workspace::Workspace;
 
+/// Сколько заметок показывается в раскрытом теге (остальные — счётчиком).
+const TAG_NOTES_CAP: usize = 50;
+/// Сколько обратных ссылок рендерится (популярная заметка может иметь сотни).
+const BACKLINKS_CAP: usize = 50;
+
 impl Workspace {
     /// Правая панель: структура, backlinks, теги, история (SPEC §9.3).
     /// Ширина — перетаскиваемой границей.
@@ -140,13 +145,14 @@ impl Workspace {
             })
             .unwrap_or_default();
 
+        let backlinks_total = backlinks.len();
         let mut content = div()
             .id("backlinks")
             .flex()
             .flex_col()
             .max_h(px(260.))
             .overflow_y_scroll()
-            .children(backlinks.into_iter().map(|ref_| {
+            .children(backlinks.into_iter().take(BACKLINKS_CAP).map(|ref_| {
                 let source = ref_.source.as_str().to_string();
                 let source_label = ref_.source.file_stem().to_string();
                 let context = ref_.context.clone();
@@ -174,6 +180,17 @@ impl Workspace {
                             .child(context),
                     )
             }));
+
+        if backlinks_total > BACKLINKS_CAP {
+            content = content.child(
+                div().px_3().py_1().child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(self.palette.text_muted)
+                        .child(format!("… ещё {} связей", backlinks_total - BACKLINKS_CAP)),
+                ),
+            );
+        }
 
         if !unresolved.is_empty() {
             content = content.child(
@@ -256,22 +273,52 @@ impl Workspace {
                                 ),
                         );
                         if expanded {
-                            let notes = self.graph.notes_with_tag(&tag);
-                            node = node.children(notes.into_iter().map(|note_id| {
-                                let rel_path = note_id.as_str().to_string();
-                                let label = note_id.file_stem().to_string();
-                                div()
-                                    .id(gpui::SharedString::from(format!("tag-note:{rel_path}")))
-                                    .pl(px(20.))
-                                    .pr_2()
-                                    .py_0p5()
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(self.palette.hover))
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        this.open_note(&rel_path, cx);
-                                    }))
-                                    .child(div().text_size(px(11.)).truncate().child(label))
-                            }));
+                            // список из кэша и с капом: notes_with_tag сканирует
+                            // все метаданные, а тысячи строк на кадр — это и
+                            // были лаги панели тегов
+                            let notes = self.expanded_tag_notes.get(&tag);
+                            let total = notes.map(|notes| notes.len()).unwrap_or(0);
+                            node = node.children(
+                                notes
+                                    .map(|notes| {
+                                        notes
+                                            .iter()
+                                            .take(TAG_NOTES_CAP)
+                                            .cloned()
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|note_id| {
+                                        let rel_path = note_id.as_str().to_string();
+                                        let label = note_id.file_stem().to_string();
+                                        div()
+                                            .id(gpui::SharedString::from(format!(
+                                                "tag-note:{rel_path}"
+                                            )))
+                                            .pl(px(20.))
+                                            .pr_2()
+                                            .py_0p5()
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(self.palette.hover))
+                                            .on_click(cx.listener(
+                                                move |this, _event, _window, cx| {
+                                                    this.open_note(&rel_path, cx);
+                                                },
+                                            ))
+                                            .child(div().text_size(px(11.)).truncate().child(label))
+                                    }),
+                            );
+                            if total > TAG_NOTES_CAP {
+                                node = node.child(
+                                    div().pl(px(20.)).pr_2().py_0p5().child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(self.palette.text_muted)
+                                            .child(format!("… ещё {}", total - TAG_NOTES_CAP)),
+                                    ),
+                                );
+                            }
                         }
                         node
                     })),
@@ -307,6 +354,9 @@ impl Workspace {
     pub(crate) fn toggle_tag(&mut self, tag: &str, cx: &mut Context<Self>) {
         if !self.expanded_tags.remove(tag) {
             self.expanded_tags.insert(tag.to_string());
+            // список считается один раз при раскрытии, не каждый кадр
+            let notes = self.graph.notes_with_tag(tag);
+            self.expanded_tag_notes.insert(tag.to_string(), notes);
         }
         cx.notify();
     }
@@ -315,7 +365,8 @@ impl Workspace {
 
     /// Полоса remote: статус синхронизации и кнопки pull/push (SPEC §10.1).
     fn render_remote_strip(&self, cx: &Context<Self>) -> impl IntoElement {
-        let status = self.git.as_ref().and_then(|git| git.remote_status());
+        // из кэша: remote_status() ходит в libgit2 на каждый кадр
+        let status = self.remote_cache.clone();
         let mut actions = div()
             .flex()
             .items_center()

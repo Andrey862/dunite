@@ -112,6 +112,12 @@ pub struct Workspace {
     /// Кэш тегов: `graph.tags()` строит полный BTreeMap по метаданным —
     /// на каждый кадр это фризило рендер больших хранилищ.
     pub(crate) tags_cache: std::collections::BTreeMap<String, usize>,
+    /// Заметки раскрытых тегов — считаются при раскрытии, не каждый кадр.
+    pub(crate) expanded_tag_notes: HashMap<String, Vec<NoteId>>,
+    /// Кэш строки remote (libgit2-запросы на каждый кадр дороги).
+    pub(crate) remote_cache: Option<String>,
+    /// Скролл дерева файлов — для виртуализации строк.
+    pub(crate) tree_scroll: gpui::ScrollHandle,
     /// Область timeline: заметка или всё хранилище.
     pub(crate) git_scope_note: bool,
     /// Раскрытый коммит в timeline (diff-превью).
@@ -188,6 +194,9 @@ impl Workspace {
             git_status_cache: String::new(),
             git_log_cache: Vec::new(),
             tags_cache: Default::default(),
+            expanded_tag_notes: HashMap::new(),
+            remote_cache: None,
+            tree_scroll: gpui::ScrollHandle::default(),
             git_scope_note: true,
             git_expanded: None,
             git_diff: Vec::new(),
@@ -646,11 +655,20 @@ impl Workspace {
     pub(crate) fn refresh_git_caches(&mut self) {
         self.git_status_cache = self.compute_git_status_text();
         self.git_log_cache = self.compute_git_log();
+        self.remote_cache = self.git.as_ref().and_then(|git| git.remote_status());
     }
 
     /// Лёгкий кэш тегов — после правок и раз в тик планировщика.
     pub(crate) fn refresh_tags_cache(&mut self) {
         self.tags_cache = self.graph.tags();
+        // списки раскрытых тегов тоже держим в кэше: notes_with_tag
+        // сканирует все метаданные
+        let expanded: Vec<String> = self.expanded_tags.iter().cloned().collect();
+        self.expanded_tag_notes.clear();
+        for tag in expanded {
+            let notes = self.graph.notes_with_tag(&tag);
+            self.expanded_tag_notes.insert(tag, notes);
+        }
     }
 
     fn compute_git_status_text(&self) -> String {
