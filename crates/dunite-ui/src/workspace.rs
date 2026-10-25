@@ -148,6 +148,7 @@ impl Workspace {
         // полный разбор хранилища при открытии; для больших vault'ов
         // позже уедет в фон (сейчас это миллисекунды)
         let graph = LinkGraph::build(&vault);
+        tracing::info!("граф и индекс построены: {} заметок", vault.note_count());
         let git = GitRepo::open(vault.root()).ok().flatten();
         Self {
             vault,

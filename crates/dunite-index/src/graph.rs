@@ -186,13 +186,32 @@ impl LinkGraph {
             return Vec::new();
         }
 
+        // статистика запроса — по одному проходу, не на каждого кандидата:
+        // иначе фразовый поиск квадратичен по корпусу (бюджет §13 — 50 мс)
+        let term_docs: Vec<HashMap<NoteId, u32>> = query
+            .terms
+            .iter()
+            .map(|term| self.docs_for_term(term))
+            .collect();
+        let phrase_hits: Vec<HashSet<NoteId>> = query
+            .phrases
+            .iter()
+            .map(|phrase| {
+                self.metas
+                    .iter()
+                    .filter(|(_, meta)| meta.body.to_lowercase().contains(phrase.as_str()))
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            })
+            .collect();
+
         // кандидаты: пересечение постингов по словам (AND)
         let mut candidates: Option<HashSet<NoteId>> = None;
-        for term in &query.terms {
-            let docs: HashSet<NoteId> = self.docs_for_term(term).into_keys().collect();
+        for docs in &term_docs {
+            let set: HashSet<NoteId> = docs.keys().cloned().collect();
             candidates = Some(match candidates {
-                Some(previous) => previous.intersection(&docs).cloned().collect(),
-                None => docs,
+                Some(previous) => previous.intersection(&set).cloned().collect(),
+                None => set,
             });
             if candidates.as_ref().is_some_and(|set| set.is_empty()) {
                 return Vec::new();
@@ -204,6 +223,7 @@ impl LinkGraph {
         };
 
         let total = self.metas.len();
+        let needles = query.needles();
         let mut hits = Vec::new();
         for id in candidates {
             let Some(meta) = self.metas.get(&id) else {
@@ -211,11 +231,7 @@ impl LinkGraph {
             };
             let body_lower = meta.body.to_lowercase();
 
-            if !query
-                .phrases
-                .iter()
-                .all(|phrase| body_lower.contains(phrase.as_str()))
-            {
+            if !phrase_hits.iter().all(|hits| hits.contains(&id)) {
                 continue;
             }
             if !query.tags.iter().all(|tag| {
@@ -247,22 +263,17 @@ impl LinkGraph {
             }
 
             // релевантность: BM25-подобная сумма по словам и фразам
+            // (статистика запроса переиспользуется, без повторных проходов)
             let mut score = 0f32;
-            for term in &query.terms {
-                let (tf, df) = self.term_stats(term, &id);
-                score += search::term_score(tf, df, total);
+            for docs in &term_docs {
+                let tf = docs.get(&id).copied().unwrap_or(0);
+                score += search::term_score(tf, docs.len(), total);
             }
-            for phrase in &query.phrases {
+            for (phrase, hits) in query.phrases.iter().zip(&phrase_hits) {
                 let tf = body_lower.matches(phrase.as_str()).count() as u32;
-                let df = self
-                    .metas
-                    .values()
-                    .filter(|meta| meta.body.to_lowercase().contains(phrase.as_str()))
-                    .count();
-                score += search::term_score(tf.max(1), df, total);
+                score += search::term_score(tf.max(1), hits.len(), total);
             }
 
-            let needles = query.needles();
             let snippets = if needles.is_empty() {
                 // запрос только из фильтров — первая строка заметки
                 meta.body
@@ -312,13 +323,6 @@ impl LinkGraph {
             }
         }
         totals
-    }
-
-    /// Частота термина в заметке и число документов с ним.
-    fn term_stats(&self, term: &str, id: &NoteId) -> (u32, usize) {
-        let docs = self.docs_for_term(term);
-        let tf = docs.get(id).copied().unwrap_or(0);
-        (tf, docs.len())
     }
 
     /// Переименовывает или перемещает ПАПКУ (SPEC §7.2).

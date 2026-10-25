@@ -9,3 +9,8 @@ rust-version.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "parse"
+harness = false

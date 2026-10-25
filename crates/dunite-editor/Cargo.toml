@@ -12,3 +12,8 @@ dunite-markdown.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "editing"
+harness = false
