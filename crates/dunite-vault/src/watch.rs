@@ -135,37 +135,44 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// Ждёт пачку с нужным событием: под нагрузкой тестов inotify приходит
+    /// с задержкой, жёсткие sleep'ы дают флаки.
+    fn wait_for_event(watcher: &mut VaultWatcher, expected: &VaultEvent) -> Vec<VaultEvent> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = Vec::new();
+        while Instant::now() < deadline {
+            let batch = watcher.drain();
+            let found = batch.iter().any(|event| event == expected);
+            seen.extend(batch);
+            if found {
+                return seen;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        seen
+    }
+
     #[test]
     fn watches_create_modify_remove() {
         let dir = tempfile::tempdir().unwrap();
         let mut watcher = VaultWatcher::new(dir.path()).unwrap();
 
-        // контракт polling'а: забрать события, дождаться тишины, получить пачку
-        let mut poll = |watcher: &mut VaultWatcher| {
-            watcher.drain();
-            std::thread::sleep(Duration::from_millis(400));
-            watcher.drain()
-        };
-
         fs::write(dir.path().join("Заметка.md"), "привет\n").unwrap();
-        std::thread::sleep(Duration::from_millis(300));
-        let events = poll(&mut watcher);
+        let events = wait_for_event(&mut watcher, &VaultEvent::Upsert("Заметка.md".to_string()));
         assert!(
             events.contains(&VaultEvent::Upsert("Заметка.md".to_string())),
             "{events:?}"
         );
 
         fs::write(dir.path().join("Заметка.md"), "изменено\n").unwrap();
-        std::thread::sleep(Duration::from_millis(300));
-        let events = poll(&mut watcher);
+        let events = wait_for_event(&mut watcher, &VaultEvent::Upsert("Заметка.md".to_string()));
         assert!(
             events.contains(&VaultEvent::Upsert("Заметка.md".to_string())),
             "{events:?}"
         );
 
         fs::remove_file(dir.path().join("Заметка.md")).unwrap();
-        std::thread::sleep(Duration::from_millis(300));
-        let events = poll(&mut watcher);
+        let events = wait_for_event(&mut watcher, &VaultEvent::Remove("Заметка.md".to_string()));
         assert!(
             events.contains(&VaultEvent::Remove("Заметка.md".to_string())),
             "{events:?}"
@@ -199,10 +206,7 @@ mod tests {
 
         let mut watcher = VaultWatcher::new(&relative_root).unwrap();
         fs::write(dir.join("Заметка.md"), "x").unwrap();
-        std::thread::sleep(Duration::from_millis(300));
-        let _ = watcher.drain();
-        std::thread::sleep(Duration::from_millis(400));
-        let events = watcher.drain();
+        let events = wait_for_event(&mut watcher, &VaultEvent::Upsert("Заметка.md".to_string()));
 
         let _ = std::fs::remove_dir_all(&dir);
         assert!(

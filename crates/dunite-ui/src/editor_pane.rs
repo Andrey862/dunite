@@ -600,6 +600,7 @@ impl Workspace {
                             .map(|t| t.note_id.clone());
                         if let Some(id) = edited {
                             workspace.graph.update_note(&workspace.vault, &id);
+                            workspace.refresh_tags_cache();
                         }
                         cx.notify();
                     }

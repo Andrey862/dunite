@@ -209,7 +209,8 @@ impl Workspace {
 
     /// Теги хранилища: клик — заметки с тегом.
     fn render_tags(&self, cx: &Context<Self>) -> impl IntoElement {
-        let tags = self.graph.tags();
+        // из кэша: graph.tags() на каждый кадр фризил большие хранилища
+        let tags = self.tags_cache.clone();
 
         div()
             .flex()

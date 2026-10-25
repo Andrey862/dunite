@@ -421,10 +421,14 @@ impl GitRepo {
         }
         revwalk.push_head()?;
         let mut out = Vec::new();
+        let mut scanned = 0usize;
         for oid in revwalk {
-            if out.len() >= limit {
+            // граница обхода: при фильтре по пути диффим деревья коммитов,
+            // полный обход истории на больших репозиториях слишком дорог
+            if out.len() >= limit || scanned >= 300 {
                 break;
             }
+            scanned += 1;
             let oid = oid?;
             let commit = self.repo.find_commit(oid)?;
             if let Some(path) = path {

@@ -104,11 +104,14 @@ pub struct Workspace {
     pub(crate) last_edit: Option<std::time::Instant>,
     /// Время последнего снапшота — для статус-бара.
     pub(crate) last_snapshot: Option<String>,
-    /// Кэши git-состояния: пересчёт на каждый кадр слишком дорог на
-    /// больших хранилищах (status сканирует все файлы) — обновляются
-    /// раз в 5 с планировщиком и по событиям.
+    /// Кэши git-состояния: пересчёт слишком дорог на больших хранилищах
+    /// (status сканирует все файлы) — тяжёлые обновляются раз в 30 с
+    /// планировщиком и по событиям.
     pub(crate) git_status_cache: String,
     pub(crate) git_log_cache: Vec<CommitInfo>,
+    /// Кэш тегов: `graph.tags()` строит полный BTreeMap по метаданным —
+    /// на каждый кадр это фризило рендер больших хранилищ.
+    pub(crate) tags_cache: std::collections::BTreeMap<String, usize>,
     /// Область timeline: заметка или всё хранилище.
     pub(crate) git_scope_note: bool,
     /// Раскрытый коммит в timeline (diff-превью).
@@ -184,6 +187,7 @@ impl Workspace {
             last_snapshot: None,
             git_status_cache: String::new(),
             git_log_cache: Vec::new(),
+            tags_cache: Default::default(),
             git_scope_note: true,
             git_expanded: None,
             git_diff: Vec::new(),
@@ -199,16 +203,24 @@ impl Workspace {
     /// Запускает фоновые автоснапшоты git (SPEC §10.1) и fetch счётчиков.
     pub fn spawn_git_scheduler(&mut self, cx: &mut Context<Self>) {
         self.refresh_git_caches();
+        self.refresh_tags_cache();
         cx.spawn(async move |this, cx| {
             let mut last_fetch = std::time::Instant::now();
+            let mut tick = 0u32;
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(5))
                     .await;
+                tick += 1;
                 this.update(cx, |workspace, cx| {
                     workspace.maybe_snapshot(cx);
-                    // git-кэши (статус, timeline) — раз в тик, не каждый кадр
-                    workspace.refresh_git_caches();
+                    // теги дёшевы; тяжёлые git-кэши — раз в 30 с (6 тиков):
+                    // git status сканирует все файлы хранилища и фризил
+                    // главный поток на больших хранилищах
+                    workspace.refresh_tags_cache();
+                    if tick % 6 == 0 {
+                        workspace.refresh_git_caches();
+                    }
                     cx.notify();
                 })
                 .ok();
@@ -629,11 +641,16 @@ impl Workspace {
         &self.git_log_cache
     }
 
-    /// Пересчёт git-кэшей: планировщик раз в 5 с и события (снапшот,
-    /// init, переключение области timeline).
+    /// Пересчёт git-кэшей: тяжело на больших хранилищах (status сканирует
+    /// все файлы) — планировщик раз в 30 с и события (снапшот, init).
     pub(crate) fn refresh_git_caches(&mut self) {
         self.git_status_cache = self.compute_git_status_text();
         self.git_log_cache = self.compute_git_log();
+    }
+
+    /// Лёгкий кэш тегов — после правок и раз в тик планировщика.
+    pub(crate) fn refresh_tags_cache(&mut self) {
+        self.tags_cache = self.graph.tags();
     }
 
     fn compute_git_status_text(&self) -> String {
