@@ -17,6 +17,25 @@ use tracing::{error, info};
 fn main() {
     tracing_subscriber::fmt().init();
 
+    // служебные флаги
+    match std::env::args().nth(1).as_deref() {
+        Some("--version") | Some("-V") => {
+            println!("dunite {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Some("--help") | Some("-h") => {
+            println!(
+                "dunite {} — локальное хранилище заметок на gpui\n\n\
+                 Использование: dunite [путь-к-хранилищу]\n\n\
+                 Функции: live preview markdown, поиск, теги, backlinks,\n\
+                 git-бэкапы и синхронизация через remote (SPEC.md)",
+                env!("CARGO_PKG_VERSION")
+            );
+            return;
+        }
+        _ => {}
+    }
+
     let vault_path = std::env::args()
         .nth(1)
         .map(PathBuf::from)

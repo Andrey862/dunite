@@ -18,10 +18,28 @@
 ## Сборка и запуск
 
 ```sh
-cargo run --release [путь-к-хранилищу]
+scripts/build-release.sh              # релизная сборка (LTO thin, strip)
+./target/release/dunite [хранилище]   # запуск; без аргумента — текущая папка
 ```
 
-Тестовое хранилище для прогонки: `testdata/vault-small`.
+Флаги: `dunite --version`, `dunite --help`.
+
+**Требования:** Linux (Wayland/X11), GPU с поддержкой Vulkan, `git`
+(для бэкапов и синхронизации). Шрифты — системные.
+
+Тестовое хранилище: `testdata/vault-small` (собранные edge-cases —
+`ignored/testdata/vault-small/edge-cases`, если развернуть плейграунд).
+
+Проверка качества: `cargo test` (юнит + e2e), `cargo bench` (ядро),
+`scripts/bench_runtime.sh 10000` (бюджеты §13, см. docs/BENCH.md).
+
+## Известные ограничения
+
+- сплиты центральной панели — задача после MVP (код в истории git);
+- SVG и PDF не рендерятся (SVG — вне MVP, PDF — отдельная задача);
+- экспорт в HTML/PDF — вне MVP;
+- поиск без стемминга (подстрочные совпадения, как в Obsidian);
+- индексация хранилища — на старте (~0.9 с на 10k), не в фоне.
 
 ## Структура
 
