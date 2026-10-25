@@ -12,6 +12,8 @@ A high-performance Obsidian clone in Rust + [gpui](https://gpui.rs)
 Specification and roadmap: [SPEC.md](SPEC.md) (in Russian). Instructions for
 AI agents and contributors: [AGENTS.md](AGENTS.md).
 
+![demo video](media/video.gif)
+
 ## Features
 
 - Live Preview markdown editor (source stays round-trip safe, render is WYSIWYG)

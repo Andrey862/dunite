@@ -12,6 +12,8 @@
 Спецификация и roadmap: [SPEC.md](SPEC.md). Инструкция для агентов и
 контрибьюторов: [AGENTS.md](AGENTS.md).
 
+![demo video](media/video.gif)
+
 ## Возможности
 
 - Live Preview markdown-редактор (исходник обратим, рендер — WYSIWYG)
