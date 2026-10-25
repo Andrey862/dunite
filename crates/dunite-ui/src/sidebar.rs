@@ -9,6 +9,11 @@ use crate::workspace::Workspace;
 const TAG_NOTES_CAP: usize = 50;
 /// Сколько обратных ссылок рендерится (популярная заметка может иметь сотни).
 const BACKLINKS_CAP: usize = 50;
+/// Сколько файлов коммита показывается чипами: init-коммит большого
+/// хранилища содержит тысячи файлов — рендер каждого на кадр фризил панель.
+const FILE_CHIPS_CAP: usize = 50;
+/// Сколько строк diff-превью рендерится.
+const DIFF_LINES_CAP: usize = 200;
 
 impl Workspace {
     /// Правая панель: структура, backlinks, теги, история (SPEC §9.3).
@@ -536,6 +541,8 @@ impl Workspace {
                         if is_open {
                             let commit_id_for_files = commit.id.clone();
                             let selected_file = self.git_diff_file.clone();
+                            let files_total = self.git_diff_files.len();
+                            let lines_total = self.git_diff.len();
                             let restore_label = format!(
                                 "восстановить {}",
                                 selected_file
@@ -550,51 +557,83 @@ impl Workspace {
                                     .flex()
                                     .flex_col()
                                     .gap_1()
-                                    // файлы коммита: клик — выбрать для превью
-                                    .children(self.git_diff_files.iter().map(|file| {
-                                        let is_selected =
-                                            selected_file.as_deref() == Some(file.as_str());
-                                        let file_path = file.clone();
-                                        let commit_for_click = commit_id_for_files.clone();
-                                        let label =
-                                            file.rsplit('/').next().unwrap_or(file).to_string();
-                                        div()
-                                            .id(gpui::SharedString::from(format!(
-                                                "git-file:{file}"
-                                            )))
-                                            .px_1p5()
-                                            .rounded_md()
-                                            .cursor_pointer()
-                                            .bg(if is_selected {
-                                                self.palette.hover
-                                            } else {
-                                                self.palette.panel
-                                            })
-                                            .on_click(cx.listener(
-                                                move |this, _event, _window, cx| {
-                                                    this.select_git_diff_file(
-                                                        &commit_for_click,
-                                                        &file_path,
-                                                        cx,
-                                                    );
-                                                },
-                                            ))
-                                            .child(div().text_size(px(10.)).truncate().child(label))
+                                    // файлы коммита: клик — выбрать для превью;
+                                    // кап — init-коммит хранит тысячи файлов
+                                    .children(self.git_diff_files.iter().take(FILE_CHIPS_CAP).map(
+                                        |file| {
+                                            let is_selected =
+                                                selected_file.as_deref() == Some(file.as_str());
+                                            let file_path = file.clone();
+                                            let commit_for_click = commit_id_for_files.clone();
+                                            let label =
+                                                file.rsplit('/').next().unwrap_or(file).to_string();
+                                            div()
+                                                .id(gpui::SharedString::from(format!(
+                                                    "git-file:{file}"
+                                                )))
+                                                .px_1p5()
+                                                .rounded_md()
+                                                .cursor_pointer()
+                                                .bg(if is_selected {
+                                                    self.palette.hover
+                                                } else {
+                                                    self.palette.panel
+                                                })
+                                                .on_click(cx.listener(
+                                                    move |this, _event, _window, cx| {
+                                                        this.select_git_diff_file(
+                                                            &commit_for_click,
+                                                            &file_path,
+                                                            cx,
+                                                        );
+                                                    },
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(10.))
+                                                        .truncate()
+                                                        .child(label),
+                                                )
+                                        },
+                                    ))
+                                    .children((files_total > FILE_CHIPS_CAP).then(|| {
+                                        div().px_1p5().child(
+                                            div()
+                                                .text_size(px(10.))
+                                                .text_color(self.palette.text_muted)
+                                                .child(format!(
+                                                    "… ещё {} файлов",
+                                                    files_total - FILE_CHIPS_CAP
+                                                )),
+                                        )
                                     }))
-                                    .children(self.git_diff.iter().map(|line| {
-                                        let (color, prefix) = match line.origin {
-                                            '+' => (self.palette.accent, "+"),
-                                            '-' => (self.palette.text_muted, "-"),
-                                            _ => (self.palette.text_muted, " "),
-                                        };
-                                        div()
-                                            .flex()
-                                            .gap_1()
-                                            .text_size(px(10.))
-                                            .font_family("monospace")
-                                            .text_color(color)
-                                            .child(prefix)
-                                            .child(line.text.clone())
+                                    .children(self.git_diff.iter().take(DIFF_LINES_CAP).map(
+                                        |line| {
+                                            let (color, prefix) = match line.origin {
+                                                '+' => (self.palette.accent, "+"),
+                                                '-' => (self.palette.text_muted, "-"),
+                                                _ => (self.palette.text_muted, " "),
+                                            };
+                                            div()
+                                                .flex()
+                                                .gap_1()
+                                                .text_size(px(10.))
+                                                .font_family("monospace")
+                                                .text_color(color)
+                                                .child(prefix)
+                                                .child(line.text.clone())
+                                        },
+                                    ))
+                                    .children((lines_total > DIFF_LINES_CAP).then(|| {
+                                        div().child(
+                                            div()
+                                                .text_size(px(10.))
+                                                .text_color(self.palette.text_muted)
+                                                .child(format!(
+                                                    "… ещё {} строк diff",
+                                                    lines_total - DIFF_LINES_CAP
+                                                )),
+                                        )
                                     }))
                                     .child(
                                         div()
