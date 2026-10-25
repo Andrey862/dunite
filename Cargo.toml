@@ -54,7 +54,6 @@ notify = "8"
 # без https/ssh: бэкапы только локальные, OpenSSL не нужен
 git2 = { version = "0.20", default-features = false }
 chrono = "0.4"
-tantivy = "0.24"
 image = "0.25"
 nucleo-matcher = "0.3"
 
