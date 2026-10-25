@@ -5,7 +5,7 @@
 use std::ops::Range;
 
 /// Результат разбора заметки.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ParsedNote {
     pub blocks: Vec<Block>,
 }

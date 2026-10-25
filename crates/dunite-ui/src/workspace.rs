@@ -69,6 +69,8 @@ pub struct Tab {
     /// Файл изменён снаружи, а в буфере есть несохранённые правки:
     /// автосейв приостановлен до явного выбора (SPEC §14).
     pub conflict: bool,
+    /// Файл удалён снаружи: буфер сохранён, вкладка помечена (SPEC §14).
+    pub deleted: bool,
 }
 
 /// Рабочая область dunite.
@@ -846,6 +848,7 @@ impl Workspace {
                     note_id: NoteId::new(rel_path),
                     editor: Editor::from_text(text),
                     conflict: false,
+                    deleted: false,
                 });
                 self.active_tab = self.tabs.len() - 1;
                 self.scroll_px = 0.;
@@ -946,7 +949,12 @@ impl Workspace {
             return;
         }
         let text = tab.editor.text();
-        let parsed = dunite_markdown::parse(&text);
+        // огромная заметка — plain-режим без декораций (SPEC §14)
+        let parsed = if text.len() > dunite_index::LARGE_NOTE_BYTES {
+            dunite_markdown::ParsedNote::default()
+        } else {
+            dunite_markdown::parse(&text)
+        };
         let buffer = tab.editor.buffer();
         let total_lines = buffer.len_lines();
 

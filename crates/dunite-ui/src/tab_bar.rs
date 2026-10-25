@@ -17,7 +17,11 @@ impl Workspace {
             .bg(self.palette.tab_bar)
             .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
                 let is_active = ix == self.active_tab;
-                let title = tab.note_id.file_stem().to_string();
+                let title = if tab.deleted {
+                    format!("{} (удалён)", tab.note_id.file_stem())
+                } else {
+                    tab.note_id.file_stem().to_string()
+                };
                 let dirty = tab.editor.is_dirty();
                 let palette = self.palette;
 

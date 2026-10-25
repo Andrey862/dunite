@@ -520,6 +520,21 @@ mod tests {
         assert!(Vault::open("/definitely/not/here").is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_entries_are_followed() {
+        // SPEC §14: симлинки поддерживаются
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("внешняя");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("Файл.md"), "текст\n").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("ссылка")).unwrap();
+
+        let vault = Vault::open(dir.path()).unwrap();
+        assert!(vault.find_file_by_name("Файл.md").is_some());
+        assert_eq!(vault.read_note("ссылка/Файл.md").unwrap(), "текст\n");
+    }
+
     // ── файловые операции (SPEC §9.1) ──────────────────────────────────
 
     #[test]

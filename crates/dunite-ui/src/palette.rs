@@ -527,21 +527,30 @@ impl Workspace {
         // по (заметка, версия) протух бы и ломал рендер декораций
         self.layout = None;
         for tab in &mut self.tabs {
+            let read = self.vault.read_note(tab.note_id.as_str());
+            let Ok(text) = read else {
+                // файл удалён снаружи: буфер не теряем, помечаем вкладку
+                // (SPEC §14); запись в буфер воссоздаст файл
+                if !tab.deleted {
+                    tab.deleted = true;
+                    self.status_message = format!(
+                        "{} удалён снаружи — содержимое вкладки сохранено",
+                        tab.note_id.as_str()
+                    );
+                }
+                continue;
+            };
+            tab.deleted = false;
             if tab.editor.is_dirty() {
-                if let Ok(text) = self.vault.read_note(tab.note_id.as_str()) {
-                    if text != tab.editor.text() {
-                        tab.conflict = true;
-                        self.status_message = format!(
-                            "{} изменён снаружи: автосейв остановлен; Ctrl+S — записать поверх, F5 — перечитать",
-                            tab.note_id.as_str()
-                        );
-                    }
+                if text != tab.editor.text() {
+                    tab.conflict = true;
+                    self.status_message = format!(
+                        "{} изменён снаружи: автосейв остановлен; Ctrl+S — записать поверх, F5 — перечитать",
+                        tab.note_id.as_str()
+                    );
                 }
                 continue;
             }
-            let Ok(text) = self.vault.read_note(tab.note_id.as_str()) else {
-                continue;
-            };
             if text != tab.editor.text() {
                 let cursor = tab.editor.selection().head;
                 tab.editor = dunite_editor::Editor::from_text(text);

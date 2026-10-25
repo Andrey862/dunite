@@ -6,9 +6,26 @@ use serde::Deserialize;
 
 use crate::meta::{LinkKind, NoteHeading, NoteMeta, ResolvedLink};
 
+/// Максимальный размер заметки для разбора и индексации (SPEC §14):
+/// огромные файлы открываются в plain-режиме без декораций и не
+/// индексируются, чтобы не ронять производительность.
+pub const LARGE_NOTE_BYTES: usize = 5 * 1024 * 1024;
+
 /// Разбирает заметку хранилища в метаданные.
 pub fn parse_note(vault: &Vault, id: &NoteId) -> NoteMeta {
     let text = vault.read_note(id.as_str()).unwrap_or_default();
+    // огромный файл: только заголовок, без разбора (SPEC §14)
+    if text.len() > LARGE_NOTE_BYTES {
+        return NoteMeta {
+            id: id.clone(),
+            title: id.file_stem().to_string(),
+            aliases: Vec::new(),
+            tags: Vec::new(),
+            headings: Vec::new(),
+            links: Vec::new(),
+            body: String::new(),
+        };
+    }
     let chars: Vec<char> = text.chars().collect();
     let parsed = dunite_markdown::parse(&text);
 
@@ -283,5 +300,29 @@ mod tests {
         assert_eq!(meta.links[0].kind, LinkKind::Embed);
         assert_eq!(meta.links[1].kind, LinkKind::Wiki);
         drop(dir);
+    }
+
+    #[test]
+    fn broken_frontmatter_does_not_panic() {
+        // SPEC §14: невалидный YAML — не падаем, заголовок из имени файла
+        let (dir, vault) = fixture("---\ntitle: [битый\n  yaml: {{{\n---\n\nтекст\n");
+        let meta = parse_note(&vault, &NoteId::new("Заметка.md"));
+        assert_eq!(meta.title, "Заметка");
+        assert!(meta.tags.is_empty());
+        drop(dir);
+    }
+
+    #[test]
+    fn huge_note_is_not_parsed_or_indexed() {
+        // SPEC §14: огромные заметки — plain-режим, без разбора и индексации
+        let dir = tempfile::tempdir().unwrap();
+        let huge = "слово ".repeat(LARGE_NOTE_BYTES / 6 + 1);
+        fs::write(dir.path().join("Огромная.md"), &huge).unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        let meta = parse_note(&vault, &NoteId::new("Огромная.md"));
+
+        assert!(meta.body.is_empty(), "тело не индексируется");
+        assert!(meta.links.is_empty());
+        assert_eq!(meta.title, "Огромная");
     }
 }
