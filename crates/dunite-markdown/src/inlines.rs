@@ -12,7 +12,17 @@ pub(super) fn decorate_block(chars: &[char], mut block: Block) -> Block {
     let scan_start = match &block.kind {
         BlockKind::Frontmatter | BlockKind::CodeBlock { .. } | BlockKind::Rule => return block,
         BlockKind::Heading { marker, .. } => marker.end,
-        BlockKind::ListItem { marker, .. } => marker.end,
+        BlockKind::ListItem {
+            marker, checkbox, ..
+        } => {
+            // скан контента — ПОСЛЕ чекбокса: иначе «- [x] [ссылка](url)»
+            // парсится как одна ссылка с display «x] [ссылка»
+            checkbox
+                .as_ref()
+                .map(|checkbox| checkbox.range.end)
+                .unwrap_or(marker.end)
+                .max(marker.end)
+        }
         BlockKind::Paragraph | BlockKind::Quote { .. } => block.range.start,
     };
     block.inlines = scan_inlines(chars, scan_start..block.range.end);

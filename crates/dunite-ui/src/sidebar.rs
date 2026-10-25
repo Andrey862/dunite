@@ -371,7 +371,6 @@ impl Workspace {
 
     /// История git: коммиты, diff-превью, восстановление заметки.
     fn render_git_history(&self, cx: &Context<Self>) -> impl IntoElement {
-        let log = self.git_log();
         let expanded = self.git_expanded.clone();
 
         let scope_chip = |label: &'static str, active: bool, scope_note: bool| {
@@ -389,6 +388,7 @@ impl Workspace {
                     this.git_scope_note = scope_note;
                     this.git_expanded = None;
                     this.git_diff.clear();
+                    this.refresh_git_caches();
                     cx.notify();
                 }))
                 .child(div().text_size(px(10.)).child(label))
@@ -443,7 +443,7 @@ impl Workspace {
                     .flex_col()
                     .max_h(px(300.))
                     .overflow_y_scroll()
-                    .children(log.into_iter().map(|commit| {
+                    .children(self.git_log().iter().map(|commit| {
                         let is_open = expanded.as_deref() == Some(commit.id.as_str());
                         let commit_id = commit.id.clone();
                         let mut node = div().flex().flex_col().child(

@@ -104,6 +104,11 @@ pub struct Workspace {
     pub(crate) last_edit: Option<std::time::Instant>,
     /// Время последнего снапшота — для статус-бара.
     pub(crate) last_snapshot: Option<String>,
+    /// Кэши git-состояния: пересчёт на каждый кадр слишком дорог на
+    /// больших хранилищах (status сканирует все файлы) — обновляются
+    /// раз в 5 с планировщиком и по событиям.
+    pub(crate) git_status_cache: String,
+    pub(crate) git_log_cache: Vec<CommitInfo>,
     /// Область timeline: заметка или всё хранилище.
     pub(crate) git_scope_note: bool,
     /// Раскрытый коммит в timeline (diff-превью).
@@ -177,6 +182,8 @@ impl Workspace {
             git,
             last_edit: None,
             last_snapshot: None,
+            git_status_cache: String::new(),
+            git_log_cache: Vec::new(),
             git_scope_note: true,
             git_expanded: None,
             git_diff: Vec::new(),
@@ -191,14 +198,20 @@ impl Workspace {
 
     /// Запускает фоновые автоснапшоты git (SPEC §10.1) и fetch счётчиков.
     pub fn spawn_git_scheduler(&mut self, cx: &mut Context<Self>) {
+        self.refresh_git_caches();
         cx.spawn(async move |this, cx| {
             let mut last_fetch = std::time::Instant::now();
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(5))
                     .await;
-                this.update(cx, |workspace, cx| workspace.maybe_snapshot(cx))
-                    .ok();
+                this.update(cx, |workspace, cx| {
+                    workspace.maybe_snapshot(cx);
+                    // git-кэши (статус, timeline) — раз в тик, не каждый кадр
+                    workspace.refresh_git_caches();
+                    cx.notify();
+                })
+                .ok();
                 // fetch раз в минуту — свежие ↑↓ для статус-бара (сетевой,
                 // поэтому редко и в фоне)
                 if last_fetch.elapsed().as_secs() >= 60 {
@@ -248,6 +261,7 @@ impl Workspace {
                 self.status_message = format!("git: ошибка снапшота: {err}");
             }
         }
+        self.refresh_git_caches();
         cx.notify();
     }
 
@@ -268,6 +282,7 @@ impl Workspace {
                 self.status_message = format!("git init не удался: {err}");
             }
         }
+        self.refresh_git_caches();
         cx.notify();
     }
 
@@ -604,8 +619,24 @@ impl Workspace {
         }
     }
 
-    /// Строка git-состояния для статус-бара (SPEC §9.5).
+    /// Строка git-состояния для статус-бара (из кэша, SPEC §9.5).
     pub(crate) fn git_status_text(&self) -> String {
+        self.git_status_cache.clone()
+    }
+
+    /// Timeline коммитов (из кэша, SPEC §10.2).
+    pub(crate) fn git_log(&self) -> &[CommitInfo] {
+        &self.git_log_cache
+    }
+
+    /// Пересчёт git-кэшей: планировщик раз в 5 с и события (снапшот,
+    /// init, переключение области timeline).
+    pub(crate) fn refresh_git_caches(&mut self) {
+        self.git_status_cache = self.compute_git_status_text();
+        self.git_log_cache = self.compute_git_log();
+    }
+
+    fn compute_git_status_text(&self) -> String {
         let Some(git) = self.git.as_ref() else {
             return "git: нет репозитория (Ctrl+G)".to_string();
         };
@@ -626,8 +657,7 @@ impl Workspace {
         }
     }
 
-    /// Timeline коммитов (SPEC §10.2).
-    pub(crate) fn git_log(&self) -> Vec<CommitInfo> {
+    fn compute_git_log(&self) -> Vec<CommitInfo> {
         let Some(git) = self.git.as_ref() else {
             return Vec::new();
         };

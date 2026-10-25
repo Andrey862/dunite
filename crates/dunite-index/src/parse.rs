@@ -24,6 +24,7 @@ pub fn parse_note(vault: &Vault, id: &NoteId) -> NoteMeta {
             headings: Vec::new(),
             links: Vec::new(),
             body: String::new(),
+            body_lower: String::new(),
         };
     }
     let chars: Vec<char> = text.chars().collect();
@@ -120,6 +121,7 @@ pub fn parse_note(vault: &Vault, id: &NoteId) -> NoteMeta {
         tags,
         headings,
         links,
+        body_lower: text.to_lowercase(),
         body: text,
     }
 }

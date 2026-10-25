@@ -54,4 +54,6 @@ pub struct NoteMeta {
     pub links: Vec<ResolvedLink>,
     /// Полный текст заметки — для фразового поиска и сниппетов (SPEC §11).
     pub body: String,
+    /// Тело в нижнем регистре — для сравнения фраз без аллокаций на запрос.
+    pub body_lower: String,
 }

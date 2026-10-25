@@ -186,52 +186,50 @@ impl LinkGraph {
             return Vec::new();
         }
 
-        // статистика запроса — по одному проходу, не на каждого кандидата:
-        // иначе фразовый поиск квадратичен по корпусу (бюджет §13 — 50 мс)
-        let term_docs: Vec<HashMap<NoteId, u32>> = query
+        // статистика запроса — по одному проходу, без клонирования строк:
+        // иначе широкие запросы на больших хранилищах съедают память
+        let term_docs: Vec<HashMap<&NoteId, u32>> = query
             .terms
             .iter()
             .map(|term| self.docs_for_term(term))
             .collect();
-        let phrase_hits: Vec<HashSet<NoteId>> = query
+        let phrase_hits: Vec<HashSet<&NoteId>> = query
             .phrases
             .iter()
             .map(|phrase| {
                 self.metas
                     .iter()
-                    .filter(|(_, meta)| meta.body.to_lowercase().contains(phrase.as_str()))
-                    .map(|(id, _)| id.clone())
+                    .filter(|(_, meta)| meta.body_lower.contains(phrase.as_str()))
+                    .map(|(id, _)| id)
                     .collect()
             })
             .collect();
 
         // кандидаты: пересечение постингов по словам (AND)
-        let mut candidates: Option<HashSet<NoteId>> = None;
+        let mut candidates: Option<HashSet<&NoteId>> = None;
         for docs in &term_docs {
-            let set: HashSet<NoteId> = docs.keys().cloned().collect();
+            let set: HashSet<&NoteId> = docs.keys().copied().collect();
             candidates = Some(match candidates {
-                Some(previous) => previous.intersection(&set).cloned().collect(),
+                Some(previous) => previous.intersection(&set).copied().collect(),
                 None => set,
             });
             if candidates.as_ref().is_some_and(|set| set.is_empty()) {
                 return Vec::new();
             }
         }
-        let candidates: HashSet<NoteId> = match candidates {
+        let candidates: HashSet<&NoteId> = match candidates {
             Some(set) => set,
-            None => self.metas.keys().cloned().collect(),
+            None => self.metas.keys().collect(),
         };
 
         let total = self.metas.len();
         let needles = query.needles();
-        let mut hits = Vec::new();
+        let mut hits: Vec<SearchHit> = Vec::new();
         for id in candidates {
-            let Some(meta) = self.metas.get(&id) else {
-                continue;
-            };
-            let body_lower = meta.body.to_lowercase();
+            let meta = &self.metas[id];
+            let body_lower = &meta.body_lower;
 
-            if !phrase_hits.iter().all(|hits| hits.contains(&id)) {
+            if !phrase_hits.iter().all(|hits| hits.contains(id)) {
                 continue;
             }
             if !query.tags.iter().all(|tag| {
@@ -251,50 +249,31 @@ impl LinkGraph {
             if !query.links.iter().all(|target| {
                 meta.links.iter().any(|link| {
                     link.target_text.to_lowercase().contains(target.as_str())
-                        || self
-                            .resolve(&id, &link.target_text)
-                            .is_some_and(|resolved| {
-                                resolved.file_stem().to_lowercase() == *target
-                                    || resolved.as_str().to_lowercase() == *target
-                            })
+                        || self.resolve(id, &link.target_text).is_some_and(|resolved| {
+                            resolved.file_stem().to_lowercase() == *target
+                                || resolved.as_str().to_lowercase() == *target
+                        })
                 })
             }) {
                 continue;
             }
 
             // релевантность: BM25-подобная сумма по словам и фразам
-            // (статистика запроса переиспользуется, без повторных проходов)
             let mut score = 0f32;
             for docs in &term_docs {
-                let tf = docs.get(&id).copied().unwrap_or(0);
+                let tf = docs.get(id).copied().unwrap_or(0);
                 score += search::term_score(tf, docs.len(), total);
             }
-            for (phrase, hits) in query.phrases.iter().zip(&phrase_hits) {
+            for (phrase, phrase_docs) in query.phrases.iter().zip(&phrase_hits) {
                 let tf = body_lower.matches(phrase.as_str()).count() as u32;
-                score += search::term_score(tf.max(1), hits.len(), total);
+                score += search::term_score(tf.max(1), phrase_docs.len(), total);
             }
 
-            let snippets = if needles.is_empty() {
-                // запрос только из фильтров — первая строка заметки
-                meta.body
-                    .lines()
-                    .next()
-                    .map(|line| {
-                        vec![Snippet {
-                            line: 0,
-                            text: line.to_string(),
-                            ranges: Vec::new(),
-                        }]
-                    })
-                    .unwrap_or_default()
-            } else {
-                search::build_snippets(&meta.body, &needles)
-            };
-
+            // сниппеты строятся ПОСЛЕ сортировки — только для топа
             hits.push(SearchHit {
-                id,
+                id: (*id).clone(),
                 score,
-                snippets,
+                snippets: Vec::new(),
             });
         }
 
@@ -304,22 +283,41 @@ impl LinkGraph {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.id.cmp(&b.id))
         });
+        hits.truncate(search::MAX_RESULTS);
+        for hit in &mut hits {
+            hit.snippets = match self.metas.get(&hit.id) {
+                Some(meta) if needles.is_empty() => meta
+                    .body
+                    .lines()
+                    .next()
+                    .map(|line| {
+                        vec![Snippet {
+                            line: 0,
+                            text: line.to_string(),
+                            ranges: Vec::new(),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                Some(meta) => search::build_snippets(&meta.body, &needles),
+                None => Vec::new(),
+            };
+        }
         hits
     }
 
     /// Заметки с термином: подстрочное совпадение токенов (как в Obsidian —
     /// «ежик» находит «ежиком»). Возвращает суммарную частоту по заметке.
-    fn docs_for_term(&self, term: &str) -> HashMap<NoteId, u32> {
+    fn docs_for_term(&self, term: &str) -> HashMap<&NoteId, u32> {
         if term.is_empty() {
             return HashMap::new();
         }
-        let mut totals: HashMap<NoteId, u32> = HashMap::new();
+        let mut totals: HashMap<&NoteId, u32> = HashMap::new();
         for (token, entries) in &self.postings {
             if !token.contains(term) {
                 continue;
             }
             for (id, count) in entries {
-                *totals.entry(id.clone()).or_default() += count;
+                *totals.entry(id).or_default() += count;
             }
         }
         totals

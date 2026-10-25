@@ -250,6 +250,47 @@ mod tests {
     }
 
     #[test]
+    fn checkbox_does_not_swallow_following_link() {
+        // регрессия: «- [x] [вложенный](ссылка)» парсилась как одна ссылка
+        // с display «x] [вложенный» — в рендере появлялась лишняя «[»
+        let note = parse("- [x] [вложенный](ссылка)\n");
+        let links: Vec<&Inline> = note.blocks[0]
+            .inlines
+            .iter()
+            .filter(|inline| matches!(inline, Inline::MarkdownLink { .. }))
+            .collect();
+        assert_eq!(links.len(), 1);
+        match links[0] {
+            Inline::MarkdownLink {
+                range,
+                target,
+                display,
+                ..
+            } => {
+                let text: String = "- [x] [вложенный](ссылка)"
+                    .chars()
+                    .skip(range.start)
+                    .take(range.end - range.start)
+                    .collect();
+                assert_eq!(text, "[вложенный](ссылка)");
+                let target_text: String = "- [x] [вложенный](ссылка)"
+                    .chars()
+                    .skip(target.start)
+                    .take(target.end - target.start)
+                    .collect();
+                assert_eq!(target_text, "ссылка");
+                let display_text: String = "- [x] [вложенный](ссылка)"
+                    .chars()
+                    .skip(display.as_ref().unwrap().start)
+                    .take(display.as_ref().unwrap().end - display.as_ref().unwrap().start)
+                    .collect();
+                assert_eq!(display_text, "вложенный");
+            }
+            other => panic!("ожидалась ссылка: {other:?}"),
+        }
+    }
+
+    #[test]
     fn unicode_ranges_are_char_correct() {
         let text = "привет **мир** #тег\n";
         let note = parse(text);
